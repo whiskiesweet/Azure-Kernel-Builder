@@ -1,0 +1,517 @@
+name: Fetch Backport Patches (Binder / kernfs / Futex)
+
+# Workflow ini men-diff file-file target antara upstream/vlxlxlv dan
+# android12-5.10 baseline, menghasilkan .patch, dry-run test ke fork kita,
+# lalu opsional commit ke Azure-Kernel-Builder.
+#
+# Target backport:
+#   binder  : drivers/android/ dari vlxlxlv/android-kernel-common-5.10
+#   kernfs  : fs/kernfs/ + include/linux/kernfs.h dari vlxlxlv
+#   futex   : kernel/futex.c + headers dari android13-5.10
+#
+# PERHATIAN: selalu review patch di tab Artifacts sebelum apply ke build!
+
+on:
+  workflow_dispatch:
+    inputs:
+      patch_target:
+        description: "Patch yang mau di-fetch"
+        type: choice
+        options:
+          - ALL
+          - binder+kernfs
+          - binder
+          - kernfs
+          - futex
+        default: ALL
+
+      vlxlxlv_branch:
+        description: "Branch vlxlxlv/android-kernel-common-5.10"
+        type: string
+        default: android12-5.10
+
+      our_kernel_branch:
+        description: "Branch fork kita (untuk dry-run test)"
+        type: string
+        default: android12-5.10
+
+      skip_large_files:
+        description: "Skip file jika diff > 5000 baris (cegah mega-patch)"
+        type: boolean
+        default: false
+
+      dry_run:
+        description: "Dry run - generate & test patch tapi JANGAN commit"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-patches:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # -----------------------------------------------------------------
+      # 1. Checkout Azure-Kernel-Builder
+      # -----------------------------------------------------------------
+      - name: Checkout Azure-Kernel-Builder
+        uses: actions/checkout@v4
+        with:
+          repository: whiskiesweet/Azure-Kernel-Builder
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup git and directories
+        run: |
+          git config user.name  "whiskiesweet"
+          git config user.email "noreply@github.com"
+          mkdir -p kernel-patches
+
+      # -----------------------------------------------------------------
+      # 2. Clone android12-5.10 upstream AOSP (baseline - selalu dibutuhkan)
+      # -----------------------------------------------------------------
+      - name: Clone android12-5.10 upstream baseline
+        run: |
+          echo "Cloning android12-5.10 upstream baseline..."
+          git clone --depth=1 \
+            --branch android12-5.10 \
+            https://android.googlesource.com/kernel/common \
+            /tmp/base-a12
+          echo "OK baseline: $(git -C /tmp/base-a12 log --oneline -1)"
+
+      # -----------------------------------------------------------------
+      # 3. Clone vlxlxlv repo (source binder + kernfs)
+      # -----------------------------------------------------------------
+      - name: Clone vlxlxlv android-kernel-common-5.10
+        if: >-
+          ${{ contains(inputs.patch_target, 'binder') ||
+              contains(inputs.patch_target, 'kernfs') ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "Cloning vlxlxlv (branch: ${{ inputs.vlxlxlv_branch }})..."
+          git clone --depth=1 \
+            --branch "${{ inputs.vlxlxlv_branch }}" \
+            https://github.com/vlxlxlv/android-kernel-common-5.10 \
+            /tmp/vlxlxlv || {
+              echo "WARN: branch '${{ inputs.vlxlxlv_branch }}' tidak ditemukan, coba default branch..."
+              git clone --depth=1 \
+                https://github.com/vlxlxlv/android-kernel-common-5.10 \
+                /tmp/vlxlxlv
+          }
+          echo "OK vlxlxlv: $(git -C /tmp/vlxlxlv log --oneline -1)"
+          echo ""
+          echo "--- vlxlxlv recent commits ---"
+          git -C /tmp/vlxlxlv log --oneline -10
+
+      # -----------------------------------------------------------------
+      # 4. Clone android13-5.10 upstream AOSP (source futex)
+      # -----------------------------------------------------------------
+      - name: Clone android13-5.10 upstream (futex source)
+        if: >-
+          ${{ inputs.patch_target == 'futex' ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "Cloning android13-5.10 upstream..."
+          git clone --depth=1 \
+            --branch android13-5.10 \
+            https://android.googlesource.com/kernel/common \
+            /tmp/source-a13
+          echo "OK android13-5.10: $(git -C /tmp/source-a13 log --oneline -1)"
+
+      # -----------------------------------------------------------------
+      # 5a. Audit Binder
+      # -----------------------------------------------------------------
+      - name: Audit Binder state (baseline vs vlxlxlv)
+        if: >-
+          ${{ contains(inputs.patch_target, 'binder') ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "=== BINDER state comparison ==="
+          for f in \
+            "drivers/android/binder.c" \
+            "drivers/android/binder_alloc.c" \
+            "drivers/android/binder_internal.h" \
+            "drivers/android/binder_alloc.h" \
+            "drivers/android/binder_trace.h"; do
+
+            BASE_L=$(wc -l < "/tmp/base-a12/$f" 2>/dev/null || echo "MISSING")
+            VLX_L=$(wc -l  < "/tmp/vlxlxlv/$f"  2>/dev/null || echo "MISSING")
+            echo "  $f"
+            echo "    baseline=$BASE_L lines | vlxlxlv=$VLX_L lines"
+          done
+
+      # -----------------------------------------------------------------
+      # 5b. Audit kernfs
+      # -----------------------------------------------------------------
+      - name: Audit kernfs state (baseline vs vlxlxlv)
+        if: >-
+          ${{ contains(inputs.patch_target, 'kernfs') ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "=== KERNFS state comparison ==="
+          echo "--- baseline fs/kernfs/ ---"
+          ls -la /tmp/base-a12/fs/kernfs/ 2>/dev/null || echo "(not found)"
+          echo ""
+          echo "--- vlxlxlv fs/kernfs/ ---"
+          ls -la /tmp/vlxlxlv/fs/kernfs/ 2>/dev/null || echo "(not found)"
+          echo ""
+          for f in \
+            "fs/kernfs/dir.c" \
+            "fs/kernfs/file.c" \
+            "fs/kernfs/inode.c" \
+            "fs/kernfs/mount.c" \
+            "fs/kernfs/symlink.c" \
+            "fs/kernfs/kernfs-internal.h" \
+            "include/linux/kernfs.h"; do
+            BASE_L=$(wc -l < "/tmp/base-a12/$f" 2>/dev/null || echo "MISSING")
+            VLX_L=$(wc -l  < "/tmp/vlxlxlv/$f"  2>/dev/null || echo "MISSING")
+            echo "  $f : base=${BASE_L}L | vlxlxlv=${VLX_L}L"
+          done
+
+      # -----------------------------------------------------------------
+      # 5c. Audit Futex
+      # -----------------------------------------------------------------
+      - name: Audit Futex state (baseline vs android13-5.10)
+        if: >-
+          ${{ inputs.patch_target == 'futex' ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "=== FUTEX state comparison ==="
+          echo "--- baseline (android12-5.10) ---"
+          echo "  kernel/futex.c        : $(wc -l < /tmp/base-a12/kernel/futex.c 2>/dev/null || echo MISSING) lines"
+          echo "  include/linux/futex.h : $(wc -l < /tmp/base-a12/include/linux/futex.h 2>/dev/null || echo MISSING) lines"
+          echo "  uapi/linux/futex.h    : $(wc -l < /tmp/base-a12/include/uapi/linux/futex.h 2>/dev/null || echo MISSING) lines"
+          echo ""
+          echo "--- android13-5.10 ---"
+          echo "  kernel/futex.c        : $(wc -l < /tmp/source-a13/kernel/futex.c 2>/dev/null || echo MISSING) lines"
+          if [ -d /tmp/source-a13/kernel/futex ]; then
+            echo "  NOTICE: kernel/futex/ direktori ada (futex sudah di-split!)"
+            ls /tmp/source-a13/kernel/futex/
+          else
+            echo "  kernel/futex.c masih single file"
+          fi
+          echo "  include/linux/futex.h : $(wc -l < /tmp/source-a13/include/linux/futex.h 2>/dev/null || echo MISSING) lines"
+          echo ""
+          echo "--- Futex commits di android13-5.10 ---"
+          git -C /tmp/source-a13 log --oneline -- \
+            kernel/futex.c kernel/futex/ \
+            include/linux/futex.h \
+            include/uapi/linux/futex.h \
+            2>/dev/null | head -15 || echo "(tidak dapat log)"
+
+      # -----------------------------------------------------------------
+      # 6. Generate Binder patches
+      # -----------------------------------------------------------------
+      - name: Generate Binder patches
+        if: >-
+          ${{ contains(inputs.patch_target, 'binder') ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "=== Generating BINDER patches ==="
+          GENERATED=0
+          SKIPPED=0
+
+          BINDER_FILES=(
+            "drivers/android/binder.c"
+            "drivers/android/binder_alloc.c"
+            "drivers/android/binder_alloc.h"
+            "drivers/android/binder_internal.h"
+            "drivers/android/binder_trace.h"
+          )
+
+          for f in "${BINDER_FILES[@]}"; do
+            BASE="/tmp/base-a12/$f"
+            SRC="/tmp/vlxlxlv/$f"
+            PNAME="binder-$(echo "$f" | tr '/' '-').patch"
+            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
+
+            if [ ! -f "$BASE" ]; then
+              echo "SKIP $f - tidak ada di baseline"
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
+            if [ ! -f "$SRC" ]; then
+              echo "SKIP $f - tidak ada di vlxlxlv"
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
+
+            diff -u "$BASE" "$SRC" \
+              --label "a/$f" \
+              --label "b/$f" \
+              > "$OUT" || true
+
+            if [ -s "$OUT" ]; then
+              LINES=$(wc -l < "$OUT")
+              HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
+              ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
+              DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
+
+              if [ "${{ inputs.skip_large_files }}" = "true" ] && [ "$LINES" -gt 5000 ]; then
+                echo "SKIP_LARGE $PNAME ($LINES lines > 5000)"
+                rm -f "$OUT"; continue
+              fi
+
+              echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "IDENTICAL $f - tidak ada diff"
+              rm -f "$OUT"
+              SKIPPED=$((SKIPPED+1))
+            fi
+          done
+
+          echo ""
+          echo "Binder summary: $GENERATED generated, $SKIPPED skipped"
+
+      # -----------------------------------------------------------------
+      # 7. Generate kernfs patches
+      # -----------------------------------------------------------------
+      - name: Generate kernfs patches
+        if: >-
+          ${{ contains(inputs.patch_target, 'kernfs') ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "=== Generating KERNFS patches ==="
+          GENERATED=0
+          SKIPPED=0
+
+          KERNFS_FILES=(
+            "fs/kernfs/dir.c"
+            "fs/kernfs/file.c"
+            "fs/kernfs/inode.c"
+            "fs/kernfs/mount.c"
+            "fs/kernfs/symlink.c"
+            "fs/kernfs/kernfs-internal.h"
+            "include/linux/kernfs.h"
+          )
+
+          for f in "${KERNFS_FILES[@]}"; do
+            BASE="/tmp/base-a12/$f"
+            SRC="/tmp/vlxlxlv/$f"
+            PNAME="kernfs-$(echo "$f" | tr '/' '-').patch"
+            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
+
+            if [ ! -f "$BASE" ]; then
+              echo "SKIP $f - tidak ada di baseline"
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
+            if [ ! -f "$SRC" ]; then
+              echo "SKIP $f - tidak ada di vlxlxlv"
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
+
+            diff -u "$BASE" "$SRC" \
+              --label "a/$f" \
+              --label "b/$f" \
+              > "$OUT" || true
+
+            if [ -s "$OUT" ]; then
+              LINES=$(wc -l < "$OUT")
+              HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
+              ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
+              DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
+              echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "IDENTICAL $f - tidak ada diff"
+              rm -f "$OUT"
+              SKIPPED=$((SKIPPED+1))
+            fi
+          done
+
+          echo ""
+          echo "kernfs summary: $GENERATED generated, $SKIPPED skipped"
+
+      # -----------------------------------------------------------------
+      # 8. Generate Futex patches
+      # -----------------------------------------------------------------
+      - name: Generate Futex patches
+        if: >-
+          ${{ inputs.patch_target == 'futex' ||
+              inputs.patch_target == 'ALL' }}
+        run: |
+          echo "=== Generating FUTEX patches ==="
+          GENERATED=0
+          SKIPPED=0
+
+          # -- Header files --
+          for f in \
+            "include/linux/futex.h" \
+            "include/uapi/linux/futex.h"; do
+
+            BASE="/tmp/base-a12/$f"
+            SRC="/tmp/source-a13/$f"
+            PNAME="futex-$(echo "$f" | tr '/' '-').patch"
+            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
+
+            if [ ! -f "$BASE" ] || [ ! -f "$SRC" ]; then
+              echo "SKIP $f - tidak ditemukan"
+              SKIPPED=$((SKIPPED+1)); continue
+            fi
+
+            diff -u "$BASE" "$SRC" \
+              --label "a/$f" \
+              --label "b/$f" \
+              > "$OUT" || true
+
+            if [ -s "$OUT" ]; then
+              LINES=$(wc -l < "$OUT")
+              HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
+              echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "IDENTICAL $f"
+              rm -f "$OUT"
+              SKIPPED=$((SKIPPED+1))
+            fi
+          done
+
+          # -- kernel/futex source - deteksi split atau single file --
+          echo ""
+          echo "--- Handling kernel/futex source ---"
+
+          if [ -d /tmp/source-a13/kernel/futex ] && [ ! -f /tmp/source-a13/kernel/futex.c ]; then
+            echo "android13-5.10 pakai kernel/futex/ direktori - diff per file"
+
+            for src_f in /tmp/source-a13/kernel/futex/*.c /tmp/source-a13/kernel/futex/*.h; do
+              [ -f "$src_f" ] || continue
+              FNAME=$(basename "$src_f")
+              PNAME="futex-kernel-futex-${FNAME}.patch"
+              OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
+              BASE_F="/tmp/base-a12/kernel/futex/$FNAME"
+
+              if [ ! -f "$BASE_F" ]; then
+                echo "  NEW_FILE $FNAME (file baru di a13, diff dari /dev/null)"
+                diff -u /dev/null "$src_f" \
+                  --label "a/kernel/futex/$FNAME" \
+                  --label "b/kernel/futex/$FNAME" \
+                  > "$OUT" || true
+              else
+                diff -u "$BASE_F" "$src_f" \
+                  --label "a/kernel/futex/$FNAME" \
+                  --label "b/kernel/futex/$FNAME" \
+                  > "$OUT" || true
+              fi
+
+              if [ -s "$OUT" ]; then
+                LINES=$(wc -l < "$OUT")
+                HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
+                ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
+                DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
+
+                if [ "${{ inputs.skip_large_files }}" = "true" ] && [ "$LINES" -gt 5000 ]; then
+                  echo "  SKIP_LARGE $PNAME ($LINES lines)"
+                  rm -f "$OUT"; continue
+                fi
+
+                echo "  DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
+                GENERATED=$((GENERATED+1))
+              else
+                echo "  IDENTICAL $FNAME"
+                rm -f "$OUT"
+                SKIPPED=$((SKIPPED+1))
+              fi
+            done
+
+          else
+            echo "android13-5.10 masih pakai kernel/futex.c single file"
+            BASE="/tmp/base-a12/kernel/futex.c"
+            SRC="/tmp/source-a13/kernel/futex.c"
+            PNAME="futex-kernel-futex.c.patch"
+            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
+
+            if [ ! -f "$BASE" ] || [ ! -f "$SRC" ]; then
+              echo "SKIP kernel/futex.c - tidak ditemukan"
+              SKIPPED=$((SKIPPED+1))
+            else
+              diff -u "$BASE" "$SRC" \
+                --label "a/kernel/futex.c" \
+                --label "b/kernel/futex.c" \
+                > "$OUT" || true
+
+              if [ -s "$OUT" ]; then
+                LINES=$(wc -l < "$OUT")
+                HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
+                ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
+                DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
+
+                if [ "${{ inputs.skip_large_files }}" = "true" ] && [ "$LINES" -gt 5000 ]; then
+                  echo "SKIP_LARGE $PNAME ($LINES lines)"
+                  rm -f "$OUT"
+                else
+                  echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
+                  GENERATED=$((GENERATED+1))
+                fi
+              else
+                echo "IDENTICAL kernel/futex.c"
+                rm -f "$OUT"
+                SKIPPED=$((SKIPPED+1))
+              fi
+            fi
+          fi
+
+          echo ""
+          echo "Futex summary: $GENERATED generated, $SKIPPED skipped"
+
+      # -----------------------------------------------------------------
+      # 9. Sanity check patch sizes
+      # -----------------------------------------------------------------
+      - name: Sanity check patch sizes
+        run: |
+          echo "=== Patch size check ==="
+          TOTAL=0
+          WARN=0
+
+          for p in "$GITHUB_WORKSPACE/kernel-patches/"*.patch; do
+            [ -f "$p" ] || continue
+            NAME=$(basename "$p")
+            LINES=$(wc -l < "$p")
+            HUNKS=$(grep -c "^@@" "$p" 2>/dev/null || echo 0)
+
+            if [ "$LINES" -gt 5000 ]; then
+              echo "WARN_LARGE  $NAME : ${LINES}L / ${HUNKS} hunks - review manual!"
+              WARN=$((WARN+1))
+            elif [ "$LINES" -gt 2000 ]; then
+              echo "WARN_MEDIUM $NAME : ${LINES}L / ${HUNKS} hunks - disarankan review"
+            else
+              echo "OK          $NAME : ${LINES}L / ${HUNKS} hunks"
+            fi
+            TOTAL=$((TOTAL+1))
+          done
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo ""
+            echo "NOTICE: Tidak ada patch yang di-generate."
+            echo "Kemungkinan semua file identical antara baseline dan source."
+            echo "Cek log step Audit di atas untuk detail."
+          else
+            echo ""
+            echo "Total: $TOTAL patch(es), $WARN dengan warning besar"
+          fi
+
+      # -----------------------------------------------------------------
+      # 10. Upload patches sebagai artifact (download dari tab Actions)
+      # -----------------------------------------------------------------
+      - name: Upload patches as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backport-patches-${{ inputs.patch_target }}-run${{ github.run_number }}
+          path: ${{ github.workspace }}/kernel-patches/*.patch
+          if-no-files-found: warn
+          retention-days: 14
+
+      # -----------------------------------------------------------------
+      # 11. Dry-run test terhadap fork kernel kita
+      # -----------------------------------------------------------------
+      - name: Dry-run test patches against our kernel fork
+        run: |
+          echo "=== DRY-RUN TEST ==="
+          echo "Target: whiskiesweet/android_kernel_common-5.10"
+          echo "Branch: ${{ inputs.our_kernel_branch }}"
+          echo ""
+
+          PATCH_COUNT=0
+          for p in "$GITHUB_WORKSPACE/kernel-patches/"*.patch; do
+            [ -f "$p" ] &
