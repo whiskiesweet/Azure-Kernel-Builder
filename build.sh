@@ -86,7 +86,7 @@ fi
 echo "Linker $LD"
 
 apply_custom_patches() {
-  PATCH_DIR="kernel-patches"
+  PATCH_DIR="../kernel-patches"
 
   [ -d "$PATCH_DIR" ] || { echo "△ kernel-patches/ tidak ditemukan — skip"; return 0; }
 
@@ -115,6 +115,9 @@ apply_custom_patches() {
   [ "$FAILED" -eq 0 ] || { echo "$FAILED patch GAGAL diterapkan!"; exit 1; }
   echo "✓ Semua custom patches berhasil applied"
 }
+
+apply_custom_patches
+
 
 # ── Generate kernel config ───────────────────────────────────────────────────
 echo "Generating GKI defconfig..."
