@@ -85,40 +85,6 @@ else
 fi
 echo "Linker $LD"
 
-apply_custom_patches() {
-  PATCH_DIR="../kernel-patches"
-
-  [ -d "$PATCH_DIR" ] || { echo "△ kernel-patches/ tidak ditemukan — skip"; return 0; }
-
-  PATCH_LIST=$(find "$PATCH_DIR" -maxdepth 1 -name "*.patch" | sort)
-  [ -n "$PATCH_LIST" ] || { echo "△ Tidak ada .patch file — skip"; return 0; }
-
-  FAILED=0
-  for patch in $PATCH_LIST; do
-    PNAME=$(basename "$patch")
-    OUT=$(mktemp)
-    if patch -p1 --forward --fuzz=3 < "$patch" > "$OUT" 2>&1; then
-      echo "✓ Applied: $PNAME"
-    else
-      if grep -q "Reversed (or previously applied)" "$OUT"; then
-        echo "△ Sudah ada (skip OK): $PNAME"
-      else
-        echo "✗ GAGAL: $PNAME"
-        cat "$OUT"
-        find . -name "*.rej" | head -5 | xargs -I{} sh -c 'echo "REJ: {}"; cat {}'
-        FAILED=$((FAILED + 1))
-      fi
-    fi
-    rm -f "$OUT"
-  done
-
-  [ "$FAILED" -eq 0 ] || { echo "$FAILED patch GAGAL diterapkan!"; exit 1; }
-  echo "✓ Semua custom patches berhasil applied"
-}
-
-apply_custom_patches
-
-
 # ── Generate kernel config ───────────────────────────────────────────────────
 echo "Generating GKI defconfig..."
 make O=out gki_defconfig
