@@ -145,7 +145,6 @@ scripts/config --file out/.config \
     -e PM_WAKELOCKS \
     -e PM_WAKELOCKS_GC \
     --set-val PM_WAKELOCKS_LIMIT 100 \
-    -d PM_WAKELOCKS_GC \
     -e CPU_IDLE \
     -e CPU_IDLE_GOV_MENU \
     -e CPU_IDLE_GOV_TEO \
