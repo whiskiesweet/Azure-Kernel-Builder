@@ -200,6 +200,7 @@ jobs:
           CLANG_VARIANT: ${{ matrix.clang }}
         run: |
           echo "Debug CLANG_PATH: $CLANG_PATH"
+          ls -la "$GITHUB_WORKSPACE/build.sh"
           cp "$GITHUB_WORKSPACE/build.sh" .
           chmod +x build.sh
           ./build.sh
