@@ -117,16 +117,6 @@ scripts/config --file out/.config \
     -e CRYPTO_LZ4 \
     -e CRYPTO_LZ4HC
 
-scripts/config --file out/.config \
-    --set-str ZRAM_DEF_COMP "lz4hc"
-
-scripts/config --file out/.config \
-    -e ZRAM_MULTI_COMP \
-    --set-str ZRAM_DEF_RECOMP "zstd"
-    
-echo "--- [PATCH] Inject native ZRAM Multi-Comp boot default ---"
-sed -i '/comp_algs\[0\].*CONFIG_ZRAM_DEF_COMP/a \	strscpy(zram->comp_algs[1], "zstd", sizeof(zram->comp_algs[1]));' drivers/block/zram/zram_drv.c
-
     
 scripts/config --file out/.config \
     -e CONFIG_UCLAMP_TASK \
@@ -210,11 +200,6 @@ if echo "$KRELEASE" | grep -q "\-rc"; then
 else
     echo "OK: tidak ada -rc suffix."
 fi
-
-echo "--- ZRAM recompress symbol check ---"
-grep -c "recompress_store\|DEVICE_ATTR_WO(recompress)" \
-    drivers/block/zram/zram_drv.c && echo "OK: recompress terdaftar" \
-    || echo "WARNING: recompress_store tidak ditemukan!"
 
 echo "--- Kernel compile.h ---"
 cat out/include/generated/compile.h 2>/dev/null || echo "compile.h not found"
