@@ -1,0 +1,63 @@
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -136,6 +136,7 @@
+ module_param_call(stop_on_user_error, binder_set_stop_on_user_error,
+ 	param_get_int, &binder_stop_on_user_error, 0644);
+ 
++#ifdef DEBUG
+ #define binder_debug(mask, x...) \
+ 	do { \
+ 		if (binder_debug_mask & mask) \
+@@ -149,6 +150,16 @@
+ 		if (binder_stop_on_user_error) \
+ 			binder_stop_on_user_error = 2; \
+ 	} while (0)
++#else
++static inline void binder_debug(uint32_t mask, const char *fmt, ...)
++{
++}
++static inline void binder_user_error(const char *fmt, ...)
++{
++	if (binder_stop_on_user_error)
++		binder_stop_on_user_error = 2;
++}
++#endif
+ 
+ #define to_flat_binder_object(hdr) \
+ 	container_of(hdr, struct flat_binder_object, hdr)
+@@ -693,7 +704,7 @@
+ 	bool has_cap_nice;
+ 	unsigned int policy = desired.sched_policy;
+ 
+-	if (task->policy == policy && task->normal_prio == desired.prio)
++	if (task->policy == policy && task->prio == desired.prio)
+ 		return;
+ 
+ 	has_cap_nice = has_capability_noaudit(task, CAP_SYS_NICE);
+@@ -730,7 +741,7 @@
+ 			      task->pid, desired.prio,
+ 			      to_kernel_prio(policy, priority));
+ 
+-	trace_binder_set_priority(task->tgid, task->pid, task->normal_prio,
++	trace_binder_set_priority(task->tgid, task->pid, task->prio,
+ 				  to_kernel_prio(policy, priority),
+ 				  desired.prio);
+ 
+@@ -3278,7 +3289,7 @@
+ 	    binder_supported_policy(current->policy)) {
+ 		/* Inherit supported policies for synchronous transactions */
+ 		t->priority.sched_policy = current->policy;
+-		t->priority.prio = current->normal_prio;
++		t->priority.prio = current->prio;
+ 	} else {
+ 		/* Otherwise, fall back to the default priority */
+ 		t->priority = target_proc->default_priority;
+@@ -3320,7 +3331,7 @@
+ 		if (extra_buffers_size < added_size) {
+ 			/* integer overflow of extra_buffers_size */
+ 			return_error = BR_FAILED_REPLY;
+-			return_error_param = EINVAL;
++			return_error_param = -EINVAL;
+ 			return_error_line = __LINE__;
+ 			goto err_bad_extra_size;
+ 		}
