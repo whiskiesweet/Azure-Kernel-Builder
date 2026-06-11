@@ -512,6 +512,16 @@ jobs:
           echo "Branch: ${{ inputs.our_kernel_branch }}"
           echo ""
 
+          PATCH_COUNT=$(find "$GITHUB_WORKSPACE/kernel-patches" \
+            -maxdepth 1 -name '*.patch' -type f 2>/dev/null | wc -l)
+
+          if [ "$PATCH_COUNT" -eq 0 ]; then
+            echo "Tidak ada patch untuk di-test, skip."
+            exit 0
+          fi
+          # ... (sisa script tidak perlu diubah)
+
           PATCH_COUNT=0
           for p in "$GITHUB_WORKSPACE/kernel-patches/"*.patch; do
-            [ -f "$p" ] &
+            [ -f "$p" ] && PATCH_COUNT=$((PATCH_COUNT+1))   ← biang masalah
+          done
