@@ -201,6 +201,7 @@ jobs:
         run: |
           echo "Debug CLANG_PATH: $CLANG_PATH"
           cp "$GITHUB_WORKSPACE/build.sh" .
+          dos2unix build.sh
           chmod +x build.sh
           bash build.sh
 
