@@ -202,7 +202,7 @@ jobs:
           echo "Debug CLANG_PATH: $CLANG_PATH"
           cp "$GITHUB_WORKSPACE/build.sh" .
           chmod +x build.sh
-          ./build.sh
+          bash build.sh
 
       # ── Package ──────────────────────────────────────────────────────────
       - name: Package with AnyKernel3
