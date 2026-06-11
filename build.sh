@@ -135,10 +135,12 @@ scripts/config --file out/.config \
 echo "Configuring Power Management for deep sleep..."
 scripts/config --file out/.config \
     -e SUSPEND \
+    -e SUSPEND_FREEZER \
     -e PM_SLEEP \
     -e PM_AUTOSLEEP \
     -e PM_WAKELOCKS \
-    --set-val PM_WAKELOCKS_LIMIT 0 \
+    -e PM_WAKELOCKS_GC \
+    --set-val PM_WAKELOCKS_LIMIT 100 \
     -d PM_WAKELOCKS_GC \
     -e CPU_IDLE \
     -e CPU_IDLE_GOV_MENU \
