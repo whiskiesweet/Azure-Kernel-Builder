@@ -121,6 +121,10 @@ scripts/config --file out/.config \
     --set-str ZRAM_DEF_COMP "lz4hc"
 
 scripts/config --file out/.config \
+    -e ZRAM_MULTI_COMP \
+    --set-str ZRAM_DEF_RECOMP "zstd"
+    
+scripts/config --file out/.config \
     -e CONFIG_UCLAMP_TASK \
     -e CONFIG_UCLAMP_TASK_GROUP
 
@@ -176,6 +180,10 @@ fi
 
 echo "--- Polly flags used ---"
 echo "KCFLAGS: $KCFLAGS"
+
+echo "--- ZRAM Multi-Comp check ---"
+grep -E "CONFIG_ZRAM_MULTI_COMP|CONFIG_ZRAM_DEF_RECOMP" \
+    out/.config | grep -v "^#" || echo "WARNING: ZRAM_MULTI_COMP tidak aktif!"
 
 echo "--- [FIX #1] PM / Deep sleep config check ---"
 grep -E "CONFIG_SUSPEND|CONFIG_PM_SLEEP|CONFIG_PM_AUTOSLEEP|CONFIG_PM_WAKELOCKS|CONFIG_ARM_PSCI_CPUIDLE" \
