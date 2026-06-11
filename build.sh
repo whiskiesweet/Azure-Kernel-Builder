@@ -211,6 +211,11 @@ else
     echo "OK: tidak ada -rc suffix."
 fi
 
+echo "--- ZRAM recompress symbol check ---"
+grep -c "recompress_store\|DEVICE_ATTR_WO(recompress)" \
+    drivers/block/zram/zram_drv.c && echo "OK: recompress terdaftar" \
+    || echo "WARNING: recompress_store tidak ditemukan!"
+
 echo "--- Kernel compile.h ---"
 cat out/include/generated/compile.h 2>/dev/null || echo "compile.h not found"
 
