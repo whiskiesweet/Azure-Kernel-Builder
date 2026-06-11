@@ -193,16 +193,6 @@ jobs:
           echo "LOCALVERSION set to: $LOCALVER"
 
       # ── Build ────────────────────────────────────────────────────────────
-            # ── Eksekusi Patching Terpisah (Wajib di atas build.sh) ────────────────
-      - name: Apply Custom Patches
-        working-directory: kernel
-        run: |
-          cp "$GITHUB_WORKSPACE/apply-patches.sh" .
-          sed -i 's/\r$//' apply-patches.sh
-          chmod +x apply-patches.sh
-          ./apply-patches.sh
-          
-      # ── Kompilasi Kernel ──────────────────────────────────────────────────
       - name: Run build.sh
         working-directory: kernel
         env:
