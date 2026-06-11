@@ -124,6 +124,10 @@ scripts/config --file out/.config \
     -e ZRAM_MULTI_COMP \
     --set-str ZRAM_DEF_RECOMP "zstd"
     
+echo "--- [PATCH] Inject native ZRAM Multi-Comp boot default ---"
+sed -i '/comp_algs\[0\].*CONFIG_ZRAM_DEF_COMP/a \	strscpy(zram->comp_algs[1], "zstd", sizeof(zram->comp_algs[1]));' drivers/block/zram/zram_drv.c
+
+    
 scripts/config --file out/.config \
     -e CONFIG_UCLAMP_TASK \
     -e CONFIG_UCLAMP_TASK_GROUP
