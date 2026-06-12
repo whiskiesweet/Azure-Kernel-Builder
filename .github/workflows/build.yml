@@ -211,6 +211,7 @@ jobs:
           ZIP_NAME="${{ inputs.kernel_name }}-${{ matrix.ksu }}-${{ matrix.clang }}"
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           git clone --depth=1 https://github.com/oceaniracle/Anykernel3-vR4 anykernel
+          sed -i "s/kernel\.string=.*/kernel.string=\"${{ inputs.kernel_name }}-${{ matrix.ksu }} by whiskiesweet\"/" anykernel/anykernel.sh
           cp kernel/out/arch/arm64/boot/Image anykernel/Image
           cd anykernel
           zip -r9 "../${ZIP_NAME}.zip" . \
@@ -234,4 +235,5 @@ jobs:
           name: ${{ env.ZIP_NAME }}
           path: ${{ env.ZIP_NAME }}.zip
           if-no-files-found: error
+          compression-level: 0
           
