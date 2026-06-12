@@ -107,7 +107,7 @@ jobs:
           echo " ${{ inputs.base_tag }}: checkpoint=merge markers"
           echo "══════════════════════════════════════════════════════"
           grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
-            /tmp/base-f2fs/fs/f2fs/ 2>/dev/null || echo "0 matches (expected — belum ada)"
+            /tmp/base-f2fs/fs/f2fs/ 2>/dev/null || true) 
 
           echo ""
           echo "══════════════════════════════════════════════════════"
