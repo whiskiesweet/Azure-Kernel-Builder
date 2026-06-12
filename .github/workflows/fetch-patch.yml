@@ -1,26 +1,4 @@
 name: Fetch F2FS Checkpoint Merge Patches (mainline v5.10 -> v5.11)
-
-# Workflow ini men-diff fs/f2fs/ antara tag v5.10 dan v5.11 di
-# torvalds/linux untuk mengambil feature "checkpoint=merge".
-#
-# Feature "checkpoint=merge" diperkenalkan sekitar merge window 5.11
-# oleh Jaegeuk Kim. Feature ini menggabungkan (merge) multiple checkpoint
-# I/O operations menjadi satu, mengurangi jumlah flush ke storage dan
-# secara langsung mengurangi stutter pada /data partition (yang pakai F2FS).
-#
-# Relevant untuk: semua device yang pakai F2FS di /data (Android 10+).
-#
-# ⚠ Catatan penting:
-#   - android12-5.10 AOSP mungkin sudah backport sebagian F2FS improvements
-#     dari Google. Workflow ini akan AUDIT dulu sebelum generate.
-#   - f2fs.h akan punya diff yang sangat besar (bukan cuma checkpoint merge)
-#     karena banyak perubahan unrelated antara v5.10 dan v5.11.
-#     Conflict paling parah ada di struct f2fs_sb_info dan enum values.
-#   - Urutan resolve manual: f2fs.h → checkpoint.c → super.c →
-#     gc.c/node.c/segment.c (biasanya minor).
-#   - Setelah apply, jalankan KMI_function_symbols_test.py karena
-#     beberapa f2fs functions di-export via EXPORT_SYMBOL.
-
 on:
   workflow_dispatch:
     inputs:
@@ -114,10 +92,10 @@ jobs:
           echo " ${{ inputs.target_tag }}: checkpoint=merge markers"
           echo "══════════════════════════════════════════════════════"
           grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
-            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true)
 
           FOUND=$(grep -rl "cprc_info\|CPRC_THREAD\|CP_OPTION_MERGE\|cp_outstanding" \
-            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true)
           if [ -n "$FOUND" ]; then
             echo ""
             echo "✓ Checkpoint merge ADA di ${{ inputs.target_tag }}:"
@@ -131,27 +109,31 @@ jobs:
       # ---------------------------------------------------------------
       # 5. Audit: cek fork kita — sudah ada belum?
       # ---------------------------------------------------------------
-      - name: Audit our kernel fork for existing checkpoint merge
+      - name: Audit checkpoint merge markers in mainline trees
         run: |
-          echo "=== Cloning fork kita untuk audit ==="
-          git clone --depth=1 \
-            --branch android12-5.10 \
-            https://github.com/whiskiesweet/android_kernel_common-5.10 \
-            /tmp/our-kernel
+          echo "══════════════════════════════════════════════════════"
+          echo " ${{ inputs.base_tag }}: checkpoint=merge markers"
+          echo "══════════════════════════════════════════════════════"
+          grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
+            /tmp/base-f2fs/fs/f2fs/ 2>/dev/null || true
 
           echo ""
-          echo "=== Cek apakah checkpoint merge sudah ada di fork kita ==="
-          OUR_FOUND=$(grep -rc "CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|checkpoint=merge" \
-            /tmp/our-kernel/fs/f2fs/ 2>/dev/null | grep -v ":0" || echo "")
+          echo "══════════════════════════════════════════════════════"
+          echo " ${{ inputs.target_tag }}: checkpoint=merge markers"
+          echo "══════════════════════════════════════════════════════"
+          grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
 
-          if [ -n "$OUR_FOUND" ]; then
-            echo "⚠ PERINGATAN: Checkpoint merge kemungkinan SUDAH ADA di fork kita:"
-            echo "$OUR_FOUND"
+          FOUND=$(grep -rl "cprc_info\|CPRC_THREAD\|CP_OPTION_MERGE\|cp_outstanding" \
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true)
+          if [ -n "$FOUND" ]; then
             echo ""
-            echo "  Patch yang di-generate mungkin akan heavy conflict atau tidak diperlukan."
-            echo "  Tetap lanjut dry-run untuk melihat seberapa parah conflict-nya."
+            echo "✓ Checkpoint merge ADA di ${{ inputs.target_tag }}:"
+            echo "$FOUND"
           else
-            echo "✓ Checkpoint merge BELUM ada di fork kita — patch masih relevan."
+            echo ""
+            echo "⚠ Checkpoint merge markers TIDAK ditemukan di ${{ inputs.target_tag }}."
+            echo "  Coba target_tag yang lebih baru (v5.15 atau v5.16)."
           fi
 
           # Simpan path untuk dry-run step
