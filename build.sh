@@ -117,6 +117,9 @@ scripts/config --file out/.config \
     -e CRYPTO_LZ4 \
     -e CRYPTO_LZ4HC
 
+scripts/config --file out/.config \
+    -e ZRAM_MULTI_COMP \
+    --set-str ZRAM_DEF_COMP "lz4hc"
     
 scripts/config --file out/.config \
     -e UCLAMP_TASK \
