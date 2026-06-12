@@ -119,12 +119,12 @@ scripts/config --file out/.config \
 
     
 scripts/config --file out/.config \
-    -e CONFIG_UCLAMP_TASK \
-    -e CONFIG_UCLAMP_TASK_GROUP
+    -e UCLAMP_TASK \
+    -e UCLAMP_TASK_GROUP
 
 scripts/config --file out/.config \
-    -d CONFIG_NUMA \
-    -d CONFIG_NODES_SPAN_OTHER_NODES
+    -d NUMA \
+    -d NODES_SPAN_OTHER_NODES
 
 echo "Configuring Power Management for deep sleep..."
 scripts/config --file out/.config \
