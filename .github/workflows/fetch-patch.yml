@@ -1,26 +1,25 @@
-name: Fetch ZRAM Multi-Comp Patches (mainline v6.1 -> v6.2)
+name: Fetch F2FS Checkpoint Merge Patches (mainline v5.10 -> v5.11)
 
-# Workflow ini men-diff drivers/block/zram/ antara tag v6.1 dan v6.2 di
-# torvalds/linux (mainline). Karena seluruh seri "zram: support multiple
-# compression streams" (Sergey Senozhatsky) masuk tepat di merge window 6.2,
-# diff v6.1..v6.2 untuk direktori ini secara praktis HANYA berisi delta
-# multi-comp -- jauh lebih kecil & terarah dibanding cherry-pick 13 patch
-# satu-satu atau diff 5.10 -> 6.2 langsung.
+# Workflow ini men-diff fs/f2fs/ antara tag v5.10 dan v5.11 di
+# torvalds/linux untuk mengambil feature "checkpoint=merge".
 #
-# Hasil: file patch per-file di kernel-patches/, lalu dry-run apply ke
-# whiskiesweet/android_kernel_common-5.10 (android12-5.10).
+# Feature "checkpoint=merge" diperkenalkan sekitar merge window 5.11
+# oleh Jaegeuk Kim. Feature ini menggabungkan (merge) multiple checkpoint
+# I/O operations menjadi satu, mengurangi jumlah flush ke storage dan
+# secara langsung mengurangi stutter pada /data partition (yang pakai F2FS).
+#
+# Relevant untuk: semua device yang pakai F2FS di /data (Android 10+).
 #
 # ⚠ Catatan penting:
-#   - Ini adalah TITIK AWAL, bukan hasil final. Diff v6.1->v6.2 hampir pasti
-#     akan punya conflict/fuzzy hunks saat di-apply ke 5.10, karena
-#     zram_drv.c di 5.10 sudah berbeda dari baseline 6.1 (Android-specific
-#     changes, writeback, dll). Review & resolve manual masih wajib,
-#     terutama untuk zram_drv.c dan zram_drv.h.
-#   - Implementasi fungsi inti (zram_recompress(), recompress sysfs handler,
-#     worker logic) ADA di diff ini karena diambil langsung dari source
-#     mainline -- bukan stub seperti di guide manual.
-#   - Setelah apply, WAJIB jalankan KMI_function_symbols_test.py karena
-#     struct zram berubah cukup signifikan (comp -> comps[]).
+#   - android12-5.10 AOSP mungkin sudah backport sebagian F2FS improvements
+#     dari Google. Workflow ini akan AUDIT dulu sebelum generate.
+#   - f2fs.h akan punya diff yang sangat besar (bukan cuma checkpoint merge)
+#     karena banyak perubahan unrelated antara v5.10 dan v5.11.
+#     Conflict paling parah ada di struct f2fs_sb_info dan enum values.
+#   - Urutan resolve manual: f2fs.h → checkpoint.c → super.c →
+#     gc.c/node.c/segment.c (biasanya minor).
+#   - Setelah apply, jalankan KMI_function_symbols_test.py karena
+#     beberapa f2fs functions di-export via EXPORT_SYMBOL.
 
 on:
   workflow_dispatch:
@@ -30,13 +29,13 @@ on:
         type: boolean
         default: true
       base_tag:
-        description: 'Baseline tag (sebelum multi-comp masuk)'
+        description: 'Baseline tag (sebelum checkpoint merge masuk)'
         type: string
-        default: v6.1
+        default: v5.10
       target_tag:
-        description: 'Target tag (sesudah multi-comp masuk)'
+        description: 'Target tag (sesudah checkpoint merge masuk)'
         type: string
-        default: v6.2
+        default: v5.11
 
 permissions:
   contents: write
@@ -47,7 +46,7 @@ jobs:
 
     steps:
       # ---------------------------------------------------------------
-      # 1. Checkout repo kita (untuk dry-run test & commit target)
+      # 1. Checkout repo kita
       # ---------------------------------------------------------------
       - name: Checkout Azure-Kernel-Builder
         uses: actions/checkout@v4
@@ -63,83 +62,126 @@ jobs:
           mkdir -p kernel-patches
 
       # ---------------------------------------------------------------
-      # 2. Sparse-clone torvalds/linux pada base_tag (drivers/block/zram saja)
-      #    Pakai partial clone + sparse-checkout supaya nggak narik
-      #    seluruh repo Linux (~4GB).
+      # 2. Sparse-clone mainline @ base_tag — fs/f2fs/ saja
       # ---------------------------------------------------------------
       - name: Sparse-clone mainline @ ${{ inputs.base_tag }} (baseline)
         run: |
-          echo "Cloning torvalds/linux @ ${{ inputs.base_tag }} (sparse: drivers/block/zram)..."
+          echo "Cloning torvalds/linux @ ${{ inputs.base_tag }} (sparse: fs/f2fs)..."
           git clone --filter=blob:none --no-checkout --depth=1 \
             --branch "${{ inputs.base_tag }}" \
             https://github.com/torvalds/linux.git \
-            /tmp/base-zram
+            /tmp/base-f2fs
 
-          cd /tmp/base-zram
+          cd /tmp/base-f2fs
           git sparse-checkout init --cone
-          git sparse-checkout set drivers/block/zram
+          git sparse-checkout set fs/f2fs
           git checkout "${{ inputs.base_tag }}"
 
           echo "✓ Baseline: $(git log --oneline -1)"
-          ls -la drivers/block/zram/
+          ls fs/f2fs/*.c fs/f2fs/*.h | wc -l | xargs -I{} echo "  {} files"
 
       # ---------------------------------------------------------------
-      # 3. Sparse-clone torvalds/linux pada target_tag
+      # 3. Sparse-clone mainline @ target_tag
       # ---------------------------------------------------------------
       - name: Sparse-clone mainline @ ${{ inputs.target_tag }} (target)
         run: |
-          echo "Cloning torvalds/linux @ ${{ inputs.target_tag }} (sparse: drivers/block/zram)..."
+          echo "Cloning torvalds/linux @ ${{ inputs.target_tag }} (sparse: fs/f2fs)..."
           git clone --filter=blob:none --no-checkout --depth=1 \
             --branch "${{ inputs.target_tag }}" \
             https://github.com/torvalds/linux.git \
-            /tmp/target-zram
+            /tmp/target-f2fs
 
-          cd /tmp/target-zram
+          cd /tmp/target-f2fs
           git sparse-checkout init --cone
-          git sparse-checkout set drivers/block/zram
+          git sparse-checkout set fs/f2fs
           git checkout "${{ inputs.target_tag }}"
 
           echo "✓ Target: $(git log --oneline -1)"
-          ls -la drivers/block/zram/
 
       # ---------------------------------------------------------------
-      # 4. Audit perubahan multi-comp antara dua tag
+      # 4. Audit: apakah checkpoint merge ada di kedua tree mainline?
       # ---------------------------------------------------------------
-      - name: Audit multi-comp markers in both trees
+      - name: Audit checkpoint merge markers in mainline trees
         run: |
-          echo "══════════════════════════════════════════════════"
-          echo " ${{ inputs.base_tag }}: ZRAM_MULTI_COMP markers"
-          echo "══════════════════════════════════════════════════"
-          grep -rc "MULTI_COMP\|comps\[\|recomp_algorithm\|ZRAM_RECOMP" \
-            /tmp/base-zram/drivers/block/zram/*.c /tmp/base-zram/drivers/block/zram/*.h 2>/dev/null \
-            || echo "0 matches"
+          echo "══════════════════════════════════════════════════════"
+          echo " ${{ inputs.base_tag }}: checkpoint=merge markers"
+          echo "══════════════════════════════════════════════════════"
+          grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
+            /tmp/base-f2fs/fs/f2fs/ 2>/dev/null || echo "0 matches (expected — belum ada)"
 
           echo ""
-          echo "══════════════════════════════════════════════════"
-          echo " ${{ inputs.target_tag }}: ZRAM_MULTI_COMP markers"
-          echo "══════════════════════════════════════════════════"
-          grep -rc "MULTI_COMP\|comps\[\|recomp_algorithm\|ZRAM_RECOMP" \
-            /tmp/target-zram/drivers/block/zram/*.c /tmp/target-zram/drivers/block/zram/*.h 2>/dev/null \
-            || echo "0 matches"
+          echo "══════════════════════════════════════════════════════"
+          echo " ${{ inputs.target_tag }}: checkpoint=merge markers"
+          echo "══════════════════════════════════════════════════════"
+          grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || echo "0 matches"
+
+          FOUND=$(grep -rl "CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD" \
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null)
+          if [ -n "$FOUND" ]; then
+            echo ""
+            echo "✓ Checkpoint merge ADA di ${{ inputs.target_tag }}:"
+            echo "$FOUND"
+          else
+            echo ""
+            echo "⚠ Checkpoint merge markers TIDAK ditemukan di ${{ inputs.target_tag }}."
+            echo "  Coba target_tag yang lebih baru (v5.12 atau v5.13)."
+          fi
 
       # ---------------------------------------------------------------
-      # 5. Generate per-file diff patches
+      # 5. Audit: cek fork kita — sudah ada belum?
       # ---------------------------------------------------------------
-      - name: Generate ZRAM multi-comp diff patches
+      - name: Audit our kernel fork for existing checkpoint merge
+        run: |
+          echo "=== Cloning fork kita untuk audit ==="
+          git clone --depth=1 \
+            --branch android12-5.10 \
+            https://github.com/whiskiesweet/android_kernel_common-5.10 \
+            /tmp/our-kernel
+
+          echo ""
+          echo "=== Cek apakah checkpoint merge sudah ada di fork kita ==="
+          OUR_FOUND=$(grep -rc "CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|checkpoint=merge" \
+            /tmp/our-kernel/fs/f2fs/ 2>/dev/null | grep -v ":0" || echo "")
+
+          if [ -n "$OUR_FOUND" ]; then
+            echo "⚠ PERINGATAN: Checkpoint merge kemungkinan SUDAH ADA di fork kita:"
+            echo "$OUR_FOUND"
+            echo ""
+            echo "  Patch yang di-generate mungkin akan heavy conflict atau tidak diperlukan."
+            echo "  Tetap lanjut dry-run untuk melihat seberapa parah conflict-nya."
+          else
+            echo "✓ Checkpoint merge BELUM ada di fork kita — patch masih relevan."
+          fi
+
+          # Simpan path untuk dry-run step
+          echo "OUR_KERNEL_PATH=/tmp/our-kernel" >> $GITHUB_ENV
+
+      # ---------------------------------------------------------------
+      # 6. Generate per-file diff patches
+      # ---------------------------------------------------------------
+      - name: Generate F2FS checkpoint merge diff patches
         run: |
           GENERATED=0
           SKIPPED=0
 
+          # File yang paling relevan untuk checkpoint merge.
+          # f2fs.h sengaja ditaruh terakhir karena akan punya diff terbesar
+          # dan paling banyak unrelated changes — perlu review paling teliti.
           for f in \
-            "drivers/block/zram/Kconfig" \
-            "drivers/block/zram/zcomp.h" \
-            "drivers/block/zram/zcomp.c" \
-            "drivers/block/zram/zram_drv.h" \
-            "drivers/block/zram/zram_drv.c"; do
+            "fs/f2fs/super.c" \
+            "fs/f2fs/checkpoint.c" \
+            "fs/f2fs/gc.c" \
+            "fs/f2fs/node.c" \
+            "fs/f2fs/segment.c" \
+            "fs/f2fs/data.c" \
+            "fs/f2fs/f2fs.h"; do
 
-            BASE="/tmp/base-zram/$f"
-            TGT="/tmp/target-zram/$f"
-            PNAME="zram-multicomp-$(basename $f).patch"
+            BASE="/tmp/base-f2fs/$f"
+            TGT="/tmp/target-f2fs/$f"
+            PNAME="f2fs-cpmerge-$(basename $f .c .h)-$(basename $f | grep -o '\.[ch]$' | tr -d '.').patch"
+            # Nama lebih bersih, contoh: f2fs-cpmerge-checkpoint-c.patch
+            PNAME="f2fs-cpmerge-$(basename $f | sed 's/\./_/g').patch"
             OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
 
             if [ ! -f "$BASE" ] || [ ! -f "$TGT" ]; then
@@ -158,8 +200,18 @@ jobs:
               HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
               ADDS=$(grep -c "^+" "$OUT" 2>/dev/null || echo 0)
               DELS=$(grep -c "^-" "$OUT" 2>/dev/null || echo 0)
-              echo "✓ $PNAME"
-              echo "  Lines: $LINES | Hunks: $HUNKS | +$ADDS / -$DELS"
+
+              # Flag file-file yang sangat besar
+              if [ $LINES -gt 4000 ]; then
+                FLAG="⚠  BESAR"
+              elif [ $LINES -gt 1500 ]; then
+                FLAG="△  medium"
+              else
+                FLAG="✓ "
+              fi
+
+              echo "$FLAG $PNAME"
+              echo "   Lines: $LINES | Hunks: $HUNKS | +$ADDS / -$DELS"
               GENERATED=$((GENERATED+1))
             else
               echo "○ $f — identical, skip"
@@ -172,63 +224,61 @@ jobs:
           echo "══════════════════════════════════════════════════"
           echo " Summary: $GENERATED generated, $SKIPPED skipped"
           echo "══════════════════════════════════════════════════"
-          ls -lah $GITHUB_WORKSPACE/kernel-patches/zram-multicomp-*.patch 2>/dev/null \
+          ls -lah $GITHUB_WORKSPACE/kernel-patches/f2fs-cpmerge-*.patch 2>/dev/null \
             || echo "No patches generated"
 
       # ---------------------------------------------------------------
-      # 6. Sanity check ukuran patch
+      # 7. Sanity check ukuran patch
       # ---------------------------------------------------------------
       - name: Sanity check patch sizes
         run: |
           echo "=== Patch size check ==="
-          for p in $GITHUB_WORKSPACE/kernel-patches/zram-multicomp-*.patch; do
+          for p in $GITHUB_WORKSPACE/kernel-patches/f2fs-cpmerge-*.patch; do
             [ -f "$p" ] || continue
             LINES=$(wc -l < "$p")
             NAME=$(basename "$p")
 
-            if [ $LINES -gt 3000 ]; then
-              echo "⚠  $NAME: $LINES lines — BESAR (kemungkinan zram_drv.c), review manual wajib"
-            elif [ $LINES -gt 800 ]; then
-              echo "△  $NAME: $LINES lines — cukup besar, review disarankan"
-            else
+            if [ $LINES -gt 5000 ]; then
+              echo "⚠  $NAME: $LINES lines — SANGAT BESAR (berisi banyak changes unrelated)"
+              echo "   → Wajib review manual, jangan apply blindly"
+            elif [ $LINES -gt 2000 ]; then
+              echo "△  $NAME: $LINES lines — besar, review disarankan"
+            elif [ $LINES -gt 0 ]; then
               echo "✓  $NAME: $LINES lines — ok"
             fi
           done
 
       # ---------------------------------------------------------------
-      # 7. Dry-run: test apply ke fork kita
+      # 8. Dry-run: test apply ke fork kita
       # ---------------------------------------------------------------
       - name: Dry-run test patches against our kernel fork
         run: |
           echo "=== Dry-run test: apply ke whiskiesweet/android_kernel_common-5.10 ==="
 
-          git clone --depth=1 \
-            --branch android12-5.10 \
-            https://github.com/whiskiesweet/android_kernel_common-5.10 \
-            /tmp/our-kernel
-
           PASS=0
           FAIL=0
           FUZZY=0
 
-          for p in $GITHUB_WORKSPACE/kernel-patches/zram-multicomp-*.patch; do
+          for p in $GITHUB_WORKSPACE/kernel-patches/f2fs-cpmerge-*.patch; do
             [ -f "$p" ] || continue
             NAME=$(basename "$p")
 
             echo ""
             echo "--- Testing $NAME ---"
 
-            if patch -p1 --dry-run -d /tmp/our-kernel < "$p" > /tmp/patch-test.log 2>&1; then
+            if patch -p1 --dry-run -d /tmp/our-kernel < "$p" \
+                > /tmp/patch-test.log 2>&1; then
               echo "✓ Applies cleanly"
               PASS=$((PASS+1))
             else
-              if patch -p1 --dry-run --fuzz=3 -d /tmp/our-kernel < "$p" >> /tmp/patch-test.log 2>&1; then
+              if patch -p1 --dry-run --fuzz=3 -d /tmp/our-kernel < "$p" \
+                  >> /tmp/patch-test.log 2>&1; then
                 echo "△ Applies dengan --fuzz=3 (minor offset)"
                 grep -E "HUNK|offset|fuzz" /tmp/patch-test.log | head -10
                 FUZZY=$((FUZZY+1))
               else
                 echo "✗ CONFLICT DETECTED"
-                tail -15 /tmp/patch-test.log
+                tail -20 /tmp/patch-test.log
                 FAIL=$((FAIL+1))
               fi
             fi
@@ -244,23 +294,22 @@ jobs:
 
           if [ $FAIL -gt 0 ]; then
             echo ""
-            echo "⚠ Ada $FAIL patch yang conflict — ini WAJAR untuk zram_drv.c/h"
-            echo "  karena 5.10 punya perbedaan dari baseline mainline v6.1"
-            echo "  (Android-specific writeback, dll)."
-            echo ""
-            echo "  Rekomendasi urutan resolve manual:"
-            echo "    1. Kconfig & zcomp.h/zcomp.c — biasanya clean/fuzzy saja"
-            echo "    2. zram_drv.h — resolve struct zram & enum zram_pageflags dulu"
-            echo "       (cek ZRAM_FLAG_SHIFT supaya ZRAM_RECOMP_PENDING/"
-            echo "       ZRAM_INCOMPRESSIBLE tidak bertabrakan dengan bit existing)"
-            echo "    3. zram_drv.c paling akhir, per-fungsi (jangan sekaligus)"
+            echo "⚠ Urutan resolve manual yang disarankan:"
+            echo "    1. f2fs.h — resolve struct f2fs_sb_info dulu"
+            echo "       Cari: cp_task, cprc_info, CP_OPTION_MERGE"
+            echo "       AOSP mungkin sudah rename atau pindahkan field ini."
+            echo "    2. checkpoint.c — logic inti async checkpoint thread"
+            echo "       Cari: f2fs_flush_merged_writes, cprc_thread, issue_checkpoint"
+            echo "    3. super.c — parsing mount option 'checkpoint=merge'"
+            echo "       Biasanya clean atau fuzzy saja."
+            echo "    4. gc.c, node.c, segment.c, data.c — biasanya minor."
           fi
 
-          # Jangan gagalkan workflow karena conflict — biarkan user decide
+          # Jangan gagalkan workflow karena conflict — ini titik awal
           exit 0
 
       # ---------------------------------------------------------------
-      # 8. Commit patch ke repo kita (skip jika dry_run=true)
+      # 9. Commit patch ke repo kita (skip jika dry_run=true)
       # ---------------------------------------------------------------
       - name: Checkout Azure-Kernel-Builder (push target)
         if: ${{ !inputs.dry_run }}
@@ -282,37 +331,36 @@ jobs:
 
           mkdir -p kernel-patches
 
-          git rm -f kernel-patches/zram-multicomp-*.patch 2>/dev/null || true
+          git rm -f kernel-patches/f2fs-cpmerge-*.patch 2>/dev/null || true
 
-          echo "=== Source patches ==="
-          ls "$GITHUB_WORKSPACE/kernel-patches/"zram-multicomp-*.patch
-
-          cp "$GITHUB_WORKSPACE"/kernel-patches/zram-multicomp-*.patch \
+          cp "$GITHUB_WORKSPACE"/kernel-patches/f2fs-cpmerge-*.patch \
             kernel-patches/
 
-          git add kernel-patches/zram-multicomp-*.patch
+          git add kernel-patches/f2fs-cpmerge-*.patch
 
           if git diff --cached --quiet; then
             echo "△ Tidak ada perubahan — patch sudah terbaru"
           else
-            BASE_SHA=$(git -C /tmp/base-zram log --oneline -1)
-            TARGET_SHA=$(git -C /tmp/target-zram log --oneline -1)
-            PATCH_LIST=$(ls kernel-patches/zram-multicomp-*.patch 2>/dev/null \
+            BASE_SHA=$(git -C /tmp/base-f2fs log --oneline -1)
+            TARGET_SHA=$(git -C /tmp/target-f2fs log --oneline -1)
+            PATCH_LIST=$(ls kernel-patches/f2fs-cpmerge-*.patch 2>/dev/null \
               | xargs -I{} basename {} | tr '\n' ' ')
 
-            git commit -m "kernel-patches: add ZRAM multi-comp diff (${{ inputs.base_tag }} -> ${{ inputs.target_tag }})
+            git commit -m "kernel-patches: add F2FS checkpoint merge diff (${{ inputs.base_tag }} -> ${{ inputs.target_tag }})
 
-            Source: github.com/torvalds/linux drivers/block/zram/
+            Source: github.com/torvalds/linux fs/f2fs/
             ${{ inputs.base_tag }} : $BASE_SHA
             ${{ inputs.target_tag }} : $TARGET_SHA
 
-            Patches: $PATCH_LIST
+            Feature: F2FS checkpoint=merge (async checkpoint batching)
+            Target: reduce /data partition I/O stutter on gaming workloads
+            Files: $PATCH_LIST
 
-            NOTE: butuh resolve manual saat apply ke android12-5.10,
-            terutama zram_drv.c/h. Jalankan KMI_function_symbols_test.py
-            setelah apply."
+            NOTE: Review manual wajib terutama f2fs.h (struct f2fs_sb_info).
+            Urutan apply: f2fs.h → checkpoint.c → super.c → gc/node/segment.
+            Jalankan KMI_function_symbols_test.py setelah apply karena
+            beberapa f2fs functions di-export via EXPORT_SYMBOL_GPL."
 
             git push origin main
             echo "✓ Pushed ke Azure-Kernel-Builder/main"
           fi
-          
