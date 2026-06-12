@@ -1,0 +1,261 @@
+name: Build kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_variant:
+        description: 'KernelSU variant (ALL = KWS + KSUN + VNL)'
+        type: choice
+        options:
+          - KWS
+          - KSUN
+          - VNL
+        default: KWS
+      clang_variant:
+        description: 'Clang toolchain Selection'
+        type: choice
+        options:
+          - CLANG-19
+          - NEUTRON-19
+          - CLANG-12
+          - MANDI-23
+          - ALL
+        default: NEUTRON-19
+      kernel_name:
+        description: 'Kernel base name'
+        type: string
+        default: Azure-vR4 
+      kernel_ref:
+        description: 'kernel branch / tag / SHA to build'
+        type: string
+        default: android12-5.10
+
+jobs:
+  # ── Resolve matrix from inputs ─────────────────────────────────────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      ksu_variants: ${{ steps.resolve.outputs.ksu_variants }}
+      clang_variants: ${{ steps.resolve.outputs.clang_variants }}
+    steps:
+      - name: Resolve variants
+        id: resolve
+        run: |
+          if [ "${{ inputs.ksu_variant }}" = "ALL" ]; then
+            echo 'ksu_variants=["KWS","KSUN","VNL"]' >> $GITHUB_OUTPUT
+          else
+            echo 'ksu_variants=["${{ inputs.ksu_variant }}"]' >> $GITHUB_OUTPUT
+          fi
+
+          if [ "${{ inputs.clang_variant }}" = "ALL" ]; then
+            echo 'clang_variants=["CLANG-19","NEUTRON-19","CLANG-12","MANDI-23"]' >> $GITHUB_OUTPUT
+          else
+            echo 'clang_variants=["${{ inputs.clang_variant }}"]' >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ksu: ${{ fromJson(needs.setup.outputs.ksu_variants) }}
+        clang: ${{ fromJson(needs.setup.outputs.clang_variants) }}
+
+    steps:
+      - name: Checkout workflow repo (build.sh lives here)
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+           sudo apt-get update -q
+           sudo apt-get install -y --no-install-recommends \
+             bc bison flex build-essential libssl-dev libelf-dev \
+             cpio kmod rsync zip patch curl ca-certificates \
+             python3 python3-pip python3-lxml git wget binutils zstd lld p7zip-full
+
+      # ── AOSP Clang r536225 (clang 19 +pgo +bolt +lto +mlgo) ─────────────
+      - name: Download AOSP Clang 19 (crDroid mirror)
+        if: matrix.clang == 'CLANG-19'
+        run: |
+          git clone --depth=1 \
+            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r536225.git \
+            ~/toolchain/aosp-r536225
+          echo "AOSP Clang r536225 ready."
+
+      # ── Neutron 19 ───────────────────────────────────────────────────────
+      - name: Download Neutron Clang 19
+        if: matrix.clang == 'NEUTRON-19'
+        run: |
+          mkdir -p ~/toolchain/neutron-clang
+          cd ~/toolchain/neutron-clang
+          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+          chmod +x antman
+          ./antman -S=10032024
+          ./antman --patch=glibc
+          echo "Neutron Clang 19 ready."
+
+      # ── AOSP Clang r416183b (LLVM 12.0.5) ───────────────────────────────
+      - name: Cache AOSP Clang r416183b
+        if: matrix.clang == 'CLANG-12'
+        id: cache-aosp-12
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchain/aosp-clang-r416183b
+          key: aosp-clang-r416183b-x86_64
+
+      - name: Download AOSP Clang r416183b (if not cached)
+        if: matrix.clang == 'CLANG-12' && steps.cache-aosp-12.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
+            ~/toolchain/aosp-clang-r416183b
+          echo "AOSP Clang r416183b (LLVM 12.0.5) ready."
+
+      # ── Mandi-Sa Clang 23 (LLVM 23.0.0 +binutils 2.45.1) ───────────────
+      - name: Cache Mandi-Sa Clang 23
+        if: matrix.clang == 'MANDI-23'
+        id: cache-mandi-23
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchain/mandi-clang
+          key: mandi-clang-llvm23-binutils2.45.1-20260601
+
+      - name: Download Mandi-Sa Clang 23 (if not cached)
+        if: matrix.clang == 'MANDI-23' && steps.cache-mandi-23.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/toolchain/mandi-clang
+          curl -L \
+            "https://github.com/Mandi-Sa/clang/releases/download/amd64-full-toolchain-23/llvm23.0.0-binutils2.45.1_amd64-full-toolchain-20260601.7z" \
+            -o /tmp/mandi-clang.7z
+          7z x /tmp/mandi-clang.7z -o"$HOME/toolchain/mandi-clang"
+          rm -f /tmp/mandi-clang.7z
+          echo "Mandi-Sa Clang 23 ready."
+
+      # ── Verify Selected Clang ────────────────────────────────────────────
+      - name: Run Clang Audit Verification
+        run: |
+          case "${{ matrix.clang }}" in
+            CLANG-19)   TC_PATH="$HOME/toolchain/aosp-r536225/bin/clang" ;;
+            NEUTRON-19) TC_PATH="$HOME/toolchain/neutron-clang/bin/clang" ;;
+            CLANG-12)   TC_PATH="$HOME/toolchain/aosp-clang-r416183b/bin/clang" ;;
+            MANDI-23)   TC_PATH="$HOME/toolchain/mandi-clang/bin/clang" ;;
+          esac
+
+          echo "=== Auditing: ${{ matrix.clang }} ==="
+          $TC_PATH --version | head -n 2 || true
+          readelf -S $TC_PATH | grep -iE "bolt|llvm_bb" || echo "No BOLT layout found"
+          strings $TC_PATH | grep -iE "regalloc-model|inline-model|mlgo" | head -n 2 || echo "No MLGO models embedded"
+
+      # ── Export CLANG_PATH ────────────────────────────────────────────────
+      - name: Export CLANG_PATH
+        run: |
+          case "${{ matrix.clang }}" in
+            CLANG-19)   echo "CLANG_PATH=$HOME/toolchain/aosp-r536225"        >> $GITHUB_ENV ;;
+            NEUTRON-19) echo "CLANG_PATH=$HOME/toolchain/neutron-clang"        >> $GITHUB_ENV ;;
+            CLANG-12)   echo "CLANG_PATH=$HOME/toolchain/aosp-clang-r416183b"  >> $GITHUB_ENV ;;
+            MANDI-23)   echo "CLANG_PATH=$HOME/toolchain/mandi-clang"          >> $GITHUB_ENV ;;
+          esac
+
+      # ── Kernel source ────────────────────────────────────────────────────
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: 'whiskiesweet/android_kernel_common-5.10'
+          ref: ${{ inputs.kernel_ref }} 
+          path: 'kernel' 
+          fetch-depth: 1 
+            
+      # ── KSU setup ────────────────────────────────────────────────────────
+      - name: Apply KernelSU (${{ matrix.ksu }})
+        if: matrix.ksu != 'VNL'
+        working-directory: kernel
+        run: |
+          if [ "${{ matrix.ksu }}" = "KWS" ]; then
+            curl -LSs "https://raw.githubusercontent.com/KOWX712/KernelSU/main/kernel/setup.sh" | bash -s master
+            printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_SU=n\nCONFIG_KSU_SUSFS=n\n' \
+              >> arch/arm64/configs/gki_defconfig
+          else
+            curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+            printf '\nCONFIG_KSU=y\nCONFIG_KSU_MANUAL_SU=n\nCONFIG_KSU_SUSFS=y\n' \
+              >> arch/arm64/configs/gki_defconfig
+          fi
+
+      - name: Verify KSU integration (${{ matrix.ksu }})
+        if: matrix.ksu != 'VNL'
+        working-directory: kernel
+        run: |
+          echo "=== KSU directory check ==="
+          ls -la KernelSU* 2>/dev/null || echo "WARNING: No KernelSU dir found!"
+          echo "=== drivers/kernelsu check ==="
+          ls drivers/kernelsu/ 2>/dev/null || echo "WARNING: drivers/kernelsu missing!"
+          echo "=== Kconfig/Makefile hooks ==="
+          grep -r "kernelsu\|KSU" drivers/Makefile drivers/Kconfig 2>/dev/null || echo "WARNING: No KSU hooks in drivers!"
+          echo "=== gki_defconfig KSU entries ==="
+          grep "CONFIG_KSU" arch/arm64/configs/gki_defconfig || echo "WARNING: No KSU configs in gki_defconfig!"
+
+      - name: Apply SUSFS patches (KSUN only)
+        if: matrix.ksu == 'KSUN'
+        working-directory: kernel
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu/ -b gki-android12-5.10 sus
+          rm -rf sus/.git
+          susfs=sus/kernel_patches
+          cp -r "$susfs/fs" .
+          cp -r "$susfs/include" .
+          cp -r "$susfs/50_add_susfs_in_gki-android12-5.10.patch" .
+          patch -p1 < 50_add_susfs_in_gki-android12-5.10.patch
+
+      # ── Inject LOCALVERSION ──────────────────────────────────────────────
+      - name: Set LOCALVERSION in gki_defconfig
+        working-directory: kernel
+        run: |
+          LOCALVER="-${{ inputs.kernel_name }}-${{ matrix.ksu }}"
+          printf '\nCONFIG_LOCALVERSION="%s"\n' "$LOCALVER" \
+            >> arch/arm64/configs/gki_defconfig
+          echo "LOCALVERSION set to: $LOCALVER"
+
+      # ── Build ────────────────────────────────────────────────────────────
+      - name: Run build.sh
+        working-directory: kernel
+        env:
+          CLANG_PATH: ${{ env.CLANG_PATH }}
+          CLANG_VARIANT: ${{ matrix.clang }}
+        run: |
+          echo "Debug CLANG_PATH: $CLANG_PATH"
+          cp "$GITHUB_WORKSPACE/build.sh" .
+          sed -i 's/\r$//' build.sh
+          chmod +x build.sh
+          ./build.sh
+
+      # ── Package ──────────────────────────────────────────────────────────
+      - name: Package with AnyKernel3
+        run: |
+          ZIP_NAME="${{ inputs.kernel_name }}-${{ matrix.ksu }}-${{ matrix.clang }}"
+          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+          git clone --depth=1 https://github.com/oceaniracle/Anykernel3-vR4 anykernel
+          sed -i "s/kernel\.string=.*/kernel.string=\"${{ inputs.kernel_name }}-${{ matrix.ksu }} by whiskiesweet\"/" anykernel/anykernel.sh
+          cp kernel/out/arch/arm64/boot/Image anykernel/Image
+          cd anykernel
+          zip -r9 "../${ZIP_NAME}.zip" . \
+             -x "*.git*"        \
+             -x ".git"          \
+             -x ".git/*"        \
+             -x "README.md"     \
+             -x "*.placeholder" \
+             -x "*.zip"
+
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image-${{ matrix.ksu }}-${{ matrix.clang }}-${{ inputs.kernel_ref }}
+          path: kernel/out/arch/arm64/boot/Image
+          if-no-files-found: error
+
+      - name: Upload flashable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_NAME }}.zip
+          if-no-files-found: error
+          compression-level: 0
