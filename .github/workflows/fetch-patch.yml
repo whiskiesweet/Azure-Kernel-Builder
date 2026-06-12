@@ -94,7 +94,7 @@ jobs:
           grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
             /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
 
-          FOUND=$(grep -rl "cprc_info\|CPRC_THREAD\|CP_OPTION_MERGE\|cp_outstanding" \
+          FOUND=$ grep -rl "cprc_info\|CPRC_THREAD\|CP_OPTION_MERGE\|cp_outstanding" \
             /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
           if [ -n "$FOUND" ]; then
             echo ""
