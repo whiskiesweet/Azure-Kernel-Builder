@@ -16,10 +16,7 @@ on:
         type: choice
         options:
           - CLANG-19
-          - NEUTRON-19
-          - CLANG-12
-          - MANDI-23
-          - ALL
+          - CLANG-23
         default: NEUTRON-19
       kernel_name:
         description: 'Kernel base name'
@@ -48,7 +45,7 @@ jobs:
           fi
 
           if [ "${{ inputs.clang_variant }}" = "ALL" ]; then
-            echo 'clang_variants=["CLANG-19","NEUTRON-19","CLANG-12","MANDI-23"]' >> $GITHUB_OUTPUT
+            echo 'clang_variants=["CLANG-19","MANDI-23"]' >> $GITHUB_OUTPUT
           else
             echo 'clang_variants=["${{ inputs.clang_variant }}"]' >> $GITHUB_OUTPUT
           fi
@@ -95,26 +92,9 @@ jobs:
           ./antman --patch=glibc
           echo "Neutron Clang 19 ready."
 
-      # ── AOSP Clang r416183b (LLVM 12.0.5) ───────────────────────────────
-      - name: Cache AOSP Clang r416183b
-        if: matrix.clang == 'CLANG-12'
-        id: cache-aosp-12
-        uses: actions/cache@v4
-        with:
-          path: ~/toolchain/aosp-clang-r416183b
-          key: aosp-clang-r416183b-x86_64
-
-      - name: Download AOSP Clang r416183b (if not cached)
-        if: matrix.clang == 'CLANG-12' && steps.cache-aosp-12.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth=1 \
-            https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b.git \
-            ~/toolchain/aosp-clang-r416183b
-          echo "AOSP Clang r416183b (LLVM 12.0.5) ready."
-
       # ── Mandi-Sa Clang 23 (LLVM 23.0.0 +binutils 2.45.1) ───────────────
       - name: Cache Mandi-Sa Clang 23
-        if: matrix.clang == 'MANDI-23'
+        if: matrix.clang == 'CLANGI-23'
         id: cache-mandi-23
         uses: actions/cache@v4
         with:
@@ -122,7 +102,7 @@ jobs:
           key: mandi-clang-llvm23-binutils2.45.1-20260601
 
       - name: Download Mandi-Sa Clang 23 (if not cached)
-        if: matrix.clang == 'MANDI-23' && steps.cache-mandi-23.outputs.cache-hit != 'true'
+        if: matrix.clang == 'CLANG-23' && steps.cache-mandi-23.outputs.cache-hit != 'true'
         run: |
           mkdir -p ~/toolchain/mandi-clang
           curl -L \
@@ -137,9 +117,7 @@ jobs:
         run: |
           case "${{ matrix.clang }}" in
             CLANG-19)   TC_PATH="$HOME/toolchain/aosp-r536225/bin/clang" ;;
-            NEUTRON-19) TC_PATH="$HOME/toolchain/neutron-clang/bin/clang" ;;
-            CLANG-12)   TC_PATH="$HOME/toolchain/aosp-clang-r416183b/bin/clang" ;;
-            MANDI-23)   TC_PATH="$HOME/toolchain/mandi-clang/bin/clang" ;;
+            CLANG-23)   TC_PATH="$HOME/toolchain/mandi-clang/bin/clang" ;;
           esac
 
           echo "=== Auditing: ${{ matrix.clang }} ==="
@@ -152,9 +130,7 @@ jobs:
         run: |
           case "${{ matrix.clang }}" in
             CLANG-19)   echo "CLANG_PATH=$HOME/toolchain/aosp-r536225"        >> $GITHUB_ENV ;;
-            NEUTRON-19) echo "CLANG_PATH=$HOME/toolchain/neutron-clang"        >> $GITHUB_ENV ;;
-            CLANG-12)   echo "CLANG_PATH=$HOME/toolchain/aosp-clang-r416183b"  >> $GITHUB_ENV ;;
-            MANDI-23)   echo "CLANG_PATH=$HOME/toolchain/mandi-clang"          >> $GITHUB_ENV ;;
+            CLANG-23)   echo "CLANG_PATH=$HOME/toolchain/mandi-clang"          >> $GITHUB_ENV ;;
           esac
 
       # ── Kernel source ────────────────────────────────────────────────────
