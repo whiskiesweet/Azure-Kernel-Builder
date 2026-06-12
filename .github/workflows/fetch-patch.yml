@@ -114,10 +114,10 @@ jobs:
           echo " ${{ inputs.target_tag }}: checkpoint=merge markers"
           echo "══════════════════════════════════════════════════════"
           grep -rc "checkpoint=merge\|CP_OPTION_MERGE\|cprc_info\|CPRC_THREAD\|f2fs_issue_checkpoint" \
-            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true)
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
 
           FOUND=$(grep -rl "cprc_info\|CPRC_THREAD\|CP_OPTION_MERGE\|cp_outstanding" \
-            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true)
+            /tmp/target-f2fs/fs/f2fs/ 2>/dev/null || true
           if [ -n "$FOUND" ]; then
             echo ""
             echo "✓ Checkpoint merge ADA di ${{ inputs.target_tag }}:"
