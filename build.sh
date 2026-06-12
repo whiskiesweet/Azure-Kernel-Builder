@@ -89,20 +89,18 @@ echo "Linker $LD"
 echo "Generating GKI defconfig..."
 DEFCONFIG_PATH="arch/arm64/configs/gki_defconfig"
 
-echo "Injecting ZRAM Multi-Comp to $DEFCONFIG_PATH (if not exist)..."
-
-if ! grep -q "CONFIG_ZRAM_MULTI_COMP=y" "$DEFCONFIG_PATH"; then
-    echo "Adding custom configs..."
-    {
-        echo "CONFIG_ZRAM_MULTI_COMP=y"
-        echo "CONFIG_ZRAM_DEF_COMP=\"lz4hc\""
-        echo "CONFIG_ZRAM_DEF_RECOMP=\"zstd\""
-    } >> "$DEFCONFIG_PATH"
-else
-    echo "Configs already exist in defconfig, skipping injection."
-fi
+echo "Injecting ZRAM Multi-Comp to $DEFCONFIG_PATH..."
+sed -i '/CONFIG_ZRAM_MULTI_COMP/d' "$DEFCONFIG_PATH"
+{
+    echo "CONFIG_ZRAM_MULTI_COMP=y"
+    echo "CONFIG_ZRAM_DEF_COMP=\"lz4hc\""
+    echo "CONFIG_ZRAM_DEF_RECOMP=\"zstd\""
+} >> "$DEFCONFIG_PATH"
 
 make O=out gki_defconfig
+
+echo "--- Cek .config setelah gki_defconfig (sebelum olddefconfig) ---"
+grep "CONFIG_ZRAM_MULTI_COMP" out/.config || echo "tidak ada entry"
 
 # ── Configure Kernel Tweaks ──────────────────────────────────────────────────
 echo "Configuring Kernel Tweaks..."
@@ -130,10 +128,12 @@ scripts/config --file out/.config \
     -e ZSMALLOC \
     -e CRYPTO_ZSTD \
     -e CRYPTO_LZ4 \
-    -e CRYPTO_LZ4HC
+    -e CRYPTO_LZ4HC \
+    -e ZRAM_MULTI_COMP
 
 scripts/config --file out/.config \
-    --set-str ZRAM_DEF_COMP "lz4hc"
+    --set-str ZRAM_DEF_COMP "lz4hc" \
+    --set-str ZRAM_DEF_RECOMP "zstd"
     
 scripts/config --file out/.config \
     -e UCLAMP_TASK \
