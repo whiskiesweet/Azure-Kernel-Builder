@@ -1,62 +1,54 @@
-name: Fetch Backport Patches (Binder / kernfs / Futex)
+name: Fetch ZRAM Multi-Comp Patches (mainline v6.1 -> v6.2)
 
-# Workflow ini men-diff file-file target antara upstream/vlxlxlv dan
-# android12-5.10 baseline, menghasilkan .patch, dry-run test ke fork kita,
-# lalu opsional commit ke Azure-Kernel-Builder.
+# Workflow ini men-diff drivers/block/zram/ antara tag v6.1 dan v6.2 di
+# torvalds/linux (mainline). Karena seluruh seri "zram: support multiple
+# compression streams" (Sergey Senozhatsky) masuk tepat di merge window 6.2,
+# diff v6.1..v6.2 untuk direktori ini secara praktis HANYA berisi delta
+# multi-comp -- jauh lebih kecil & terarah dibanding cherry-pick 13 patch
+# satu-satu atau diff 5.10 -> 6.2 langsung.
 #
-# Target backport:
-#   binder  : drivers/android/ dari vlxlxlv/android-kernel-common-5.10
-#   kernfs  : fs/kernfs/ + include/linux/kernfs.h dari vlxlxlv
-#   futex   : kernel/futex.c + headers dari android13-5.10
+# Hasil: file patch per-file di kernel-patches/, lalu dry-run apply ke
+# whiskiesweet/android_kernel_common-5.10 (android12-5.10).
 #
-# PERHATIAN: selalu review patch di tab Artifacts sebelum apply ke build!
+# ⚠ Catatan penting:
+#   - Ini adalah TITIK AWAL, bukan hasil final. Diff v6.1->v6.2 hampir pasti
+#     akan punya conflict/fuzzy hunks saat di-apply ke 5.10, karena
+#     zram_drv.c di 5.10 sudah berbeda dari baseline 6.1 (Android-specific
+#     changes, writeback, dll). Review & resolve manual masih wajib,
+#     terutama untuk zram_drv.c dan zram_drv.h.
+#   - Implementasi fungsi inti (zram_recompress(), recompress sysfs handler,
+#     worker logic) ADA di diff ini karena diambil langsung dari source
+#     mainline -- bukan stub seperti di guide manual.
+#   - Setelah apply, WAJIB jalankan KMI_function_symbols_test.py karena
+#     struct zram berubah cukup signifikan (comp -> comps[]).
 
 on:
   workflow_dispatch:
     inputs:
-      patch_target:
-        description: "Patch yang mau di-fetch"
-        type: choice
-        options:
-          - ALL
-          - binder+kernfs
-          - binder
-          - kernfs
-          - futex
-        default: ALL
-
-      vlxlxlv_branch:
-        description: "Branch vlxlxlv/android-kernel-common-5.10"
-        type: string
-        default: android12-5.10
-
-      our_kernel_branch:
-        description: "Branch fork kita (untuk dry-run test)"
-        type: string
-        default: android12-5.10
-
-      skip_large_files:
-        description: "Skip file jika diff > 5000 baris (cegah mega-patch)"
-        type: boolean
-        default: false
-
       dry_run:
-        description: "Dry run - generate & test patch tapi JANGAN commit"
+        description: 'Dry run — generate & test patch tapi JANGAN commit ke repo'
         type: boolean
         default: true
+      base_tag:
+        description: 'Baseline tag (sebelum multi-comp masuk)'
+        type: string
+        default: v6.1
+      target_tag:
+        description: 'Target tag (sesudah multi-comp masuk)'
+        type: string
+        default: v6.2
 
 permissions:
   contents: write
 
 jobs:
-  fetch-patches:
+  generate:
     runs-on: ubuntu-latest
 
     steps:
-
-      # -----------------------------------------------------------------
-      # 1. Checkout Azure-Kernel-Builder
-      # -----------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # 1. Checkout repo kita (untuk dry-run test & commit target)
+      # ---------------------------------------------------------------
       - name: Checkout Azure-Kernel-Builder
         uses: actions/checkout@v4
         with:
@@ -64,180 +56,99 @@ jobs:
           ref: main
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup git and directories
+      - name: Setup git & directories
         run: |
           git config user.name  "whiskiesweet"
           git config user.email "noreply@github.com"
           mkdir -p kernel-patches
 
-      # -----------------------------------------------------------------
-      # 2. Clone android12-5.10 upstream AOSP (baseline - selalu dibutuhkan)
-      # -----------------------------------------------------------------
-      - name: Clone android12-5.10 upstream baseline
+      # ---------------------------------------------------------------
+      # 2. Sparse-clone torvalds/linux pada base_tag (drivers/block/zram saja)
+      #    Pakai partial clone + sparse-checkout supaya nggak narik
+      #    seluruh repo Linux (~4GB).
+      # ---------------------------------------------------------------
+      - name: Sparse-clone mainline @ ${{ inputs.base_tag }} (baseline)
         run: |
-          echo "Cloning android12-5.10 upstream baseline..."
-          git clone --depth=1 \
-            --branch android12-5.10 \
-            https://android.googlesource.com/kernel/common \
-            /tmp/base-a12
-          echo "OK baseline: $(git -C /tmp/base-a12 log --oneline -1)"
+          echo "Cloning torvalds/linux @ ${{ inputs.base_tag }} (sparse: drivers/block/zram)..."
+          git clone --filter=blob:none --no-checkout --depth=1 \
+            --branch "${{ inputs.base_tag }}" \
+            https://github.com/torvalds/linux.git \
+            /tmp/base-zram
 
-      # -----------------------------------------------------------------
-      # 3. Clone vlxlxlv repo (source binder + kernfs)
-      # -----------------------------------------------------------------
-      - name: Clone vlxlxlv android-kernel-common-5.10
-        if: >-
-          ${{ contains(inputs.patch_target, 'binder') ||
-              contains(inputs.patch_target, 'kernfs') ||
-              inputs.patch_target == 'ALL' }}
+          cd /tmp/base-zram
+          git sparse-checkout init --cone
+          git sparse-checkout set drivers/block/zram
+          git checkout "${{ inputs.base_tag }}"
+
+          echo "✓ Baseline: $(git log --oneline -1)"
+          ls -la drivers/block/zram/
+
+      # ---------------------------------------------------------------
+      # 3. Sparse-clone torvalds/linux pada target_tag
+      # ---------------------------------------------------------------
+      - name: Sparse-clone mainline @ ${{ inputs.target_tag }} (target)
         run: |
-          echo "Cloning vlxlxlv (branch: ${{ inputs.vlxlxlv_branch }})..."
-          git clone --depth=1 \
-            --branch "${{ inputs.vlxlxlv_branch }}" \
-            https://github.com/vlxlxlv/android-kernel-common-5.10 \
-            /tmp/vlxlxlv || {
-              echo "WARN: branch '${{ inputs.vlxlxlv_branch }}' tidak ditemukan, coba default branch..."
-              git clone --depth=1 \
-                https://github.com/vlxlxlv/android-kernel-common-5.10 \
-                /tmp/vlxlxlv
-          }
-          echo "OK vlxlxlv: $(git -C /tmp/vlxlxlv log --oneline -1)"
+          echo "Cloning torvalds/linux @ ${{ inputs.target_tag }} (sparse: drivers/block/zram)..."
+          git clone --filter=blob:none --no-checkout --depth=1 \
+            --branch "${{ inputs.target_tag }}" \
+            https://github.com/torvalds/linux.git \
+            /tmp/target-zram
+
+          cd /tmp/target-zram
+          git sparse-checkout init --cone
+          git sparse-checkout set drivers/block/zram
+          git checkout "${{ inputs.target_tag }}"
+
+          echo "✓ Target: $(git log --oneline -1)"
+          ls -la drivers/block/zram/
+
+      # ---------------------------------------------------------------
+      # 4. Audit perubahan multi-comp antara dua tag
+      # ---------------------------------------------------------------
+      - name: Audit multi-comp markers in both trees
+        run: |
+          echo "══════════════════════════════════════════════════"
+          echo " ${{ inputs.base_tag }}: ZRAM_MULTI_COMP markers"
+          echo "══════════════════════════════════════════════════"
+          grep -rc "MULTI_COMP\|comps\[\|recomp_algorithm\|ZRAM_RECOMP" \
+            /tmp/base-zram/drivers/block/zram/*.c /tmp/base-zram/drivers/block/zram/*.h 2>/dev/null \
+            || echo "0 matches"
+
           echo ""
-          echo "--- vlxlxlv recent commits ---"
-          git -C /tmp/vlxlxlv log --oneline -10
+          echo "══════════════════════════════════════════════════"
+          echo " ${{ inputs.target_tag }}: ZRAM_MULTI_COMP markers"
+          echo "══════════════════════════════════════════════════"
+          grep -rc "MULTI_COMP\|comps\[\|recomp_algorithm\|ZRAM_RECOMP" \
+            /tmp/target-zram/drivers/block/zram/*.c /tmp/target-zram/drivers/block/zram/*.h 2>/dev/null \
+            || echo "0 matches"
 
-      # -----------------------------------------------------------------
-      # 4. Clone android13-5.10 upstream AOSP (source futex)
-      # -----------------------------------------------------------------
-      - name: Clone android13-5.10 upstream (futex source)
-        if: >-
-          ${{ inputs.patch_target == 'futex' ||
-              inputs.patch_target == 'ALL' }}
+      # ---------------------------------------------------------------
+      # 5. Generate per-file diff patches
+      # ---------------------------------------------------------------
+      - name: Generate ZRAM multi-comp diff patches
         run: |
-          echo "Cloning android13-5.10 upstream..."
-          git clone --depth=1 \
-            --branch android13-5.10 \
-            https://android.googlesource.com/kernel/common \
-            /tmp/source-a13
-          echo "OK android13-5.10: $(git -C /tmp/source-a13 log --oneline -1)"
-
-      # -----------------------------------------------------------------
-      # 5a. Audit Binder
-      # -----------------------------------------------------------------
-      - name: Audit Binder state (baseline vs vlxlxlv)
-        if: >-
-          ${{ contains(inputs.patch_target, 'binder') ||
-              inputs.patch_target == 'ALL' }}
-        run: |
-          echo "=== BINDER state comparison ==="
-          for f in \
-            "drivers/android/binder.c" \
-            "drivers/android/binder_alloc.c" \
-            "drivers/android/binder_internal.h" \
-            "drivers/android/binder_alloc.h" \
-            "drivers/android/binder_trace.h"; do
-
-            BASE_L=$(wc -l < "/tmp/base-a12/$f" 2>/dev/null || echo "MISSING")
-            VLX_L=$(wc -l  < "/tmp/vlxlxlv/$f"  2>/dev/null || echo "MISSING")
-            echo "  $f"
-            echo "    baseline=$BASE_L lines | vlxlxlv=$VLX_L lines"
-          done
-
-      # -----------------------------------------------------------------
-      # 5b. Audit kernfs
-      # -----------------------------------------------------------------
-      - name: Audit kernfs state (baseline vs vlxlxlv)
-        if: >-
-          ${{ contains(inputs.patch_target, 'kernfs') ||
-              inputs.patch_target == 'ALL' }}
-        run: |
-          echo "=== KERNFS state comparison ==="
-          echo "--- baseline fs/kernfs/ ---"
-          ls -la /tmp/base-a12/fs/kernfs/ 2>/dev/null || echo "(not found)"
-          echo ""
-          echo "--- vlxlxlv fs/kernfs/ ---"
-          ls -la /tmp/vlxlxlv/fs/kernfs/ 2>/dev/null || echo "(not found)"
-          echo ""
-          for f in \
-            "fs/kernfs/dir.c" \
-            "fs/kernfs/file.c" \
-            "fs/kernfs/inode.c" \
-            "fs/kernfs/mount.c" \
-            "fs/kernfs/symlink.c" \
-            "fs/kernfs/kernfs-internal.h" \
-            "include/linux/kernfs.h"; do
-            BASE_L=$(wc -l < "/tmp/base-a12/$f" 2>/dev/null || echo "MISSING")
-            VLX_L=$(wc -l  < "/tmp/vlxlxlv/$f"  2>/dev/null || echo "MISSING")
-            echo "  $f : base=${BASE_L}L | vlxlxlv=${VLX_L}L"
-          done
-
-      # -----------------------------------------------------------------
-      # 5c. Audit Futex
-      # -----------------------------------------------------------------
-      - name: Audit Futex state (baseline vs android13-5.10)
-        if: >-
-          ${{ inputs.patch_target == 'futex' ||
-              inputs.patch_target == 'ALL' }}
-        run: |
-          echo "=== FUTEX state comparison ==="
-          echo "--- baseline (android12-5.10) ---"
-          echo "  kernel/futex.c        : $(wc -l < /tmp/base-a12/kernel/futex.c 2>/dev/null || echo MISSING) lines"
-          echo "  include/linux/futex.h : $(wc -l < /tmp/base-a12/include/linux/futex.h 2>/dev/null || echo MISSING) lines"
-          echo "  uapi/linux/futex.h    : $(wc -l < /tmp/base-a12/include/uapi/linux/futex.h 2>/dev/null || echo MISSING) lines"
-          echo ""
-          echo "--- android13-5.10 ---"
-          echo "  kernel/futex.c        : $(wc -l < /tmp/source-a13/kernel/futex.c 2>/dev/null || echo MISSING) lines"
-          if [ -d /tmp/source-a13/kernel/futex ]; then
-            echo "  NOTICE: kernel/futex/ direktori ada (futex sudah di-split!)"
-            ls /tmp/source-a13/kernel/futex/
-          else
-            echo "  kernel/futex.c masih single file"
-          fi
-          echo "  include/linux/futex.h : $(wc -l < /tmp/source-a13/include/linux/futex.h 2>/dev/null || echo MISSING) lines"
-          echo ""
-          echo "--- Futex commits di android13-5.10 ---"
-          git -C /tmp/source-a13 log --oneline -- \
-            kernel/futex.c kernel/futex/ \
-            include/linux/futex.h \
-            include/uapi/linux/futex.h \
-            2>/dev/null | head -15 || echo "(tidak dapat log)"
-
-      # -----------------------------------------------------------------
-      # 6. Generate Binder patches
-      # -----------------------------------------------------------------
-      - name: Generate Binder patches
-        if: >-
-          ${{ contains(inputs.patch_target, 'binder') ||
-              inputs.patch_target == 'ALL' }}
-        run: |
-          echo "=== Generating BINDER patches ==="
           GENERATED=0
           SKIPPED=0
 
-          BINDER_FILES=(
-            "drivers/android/binder.c"
-            "drivers/android/binder_alloc.c"
-            "drivers/android/binder_alloc.h"
-            "drivers/android/binder_internal.h"
-            "drivers/android/binder_trace.h"
-          )
+          for f in \
+            "drivers/block/zram/Kconfig" \
+            "drivers/block/zram/zcomp.h" \
+            "drivers/block/zram/zcomp.c" \
+            "drivers/block/zram/zram_drv.h" \
+            "drivers/block/zram/zram_drv.c"; do
 
-          for f in "${BINDER_FILES[@]}"; do
-            BASE="/tmp/base-a12/$f"
-            SRC="/tmp/vlxlxlv/$f"
-            PNAME="binder-$(echo "$f" | tr '/' '-').patch"
+            BASE="/tmp/base-zram/$f"
+            TGT="/tmp/target-zram/$f"
+            PNAME="zram-multicomp-$(basename $f).patch"
             OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
 
-            if [ ! -f "$BASE" ]; then
-              echo "SKIP $f - tidak ada di baseline"
-              SKIPPED=$((SKIPPED+1)); continue
-            fi
-            if [ ! -f "$SRC" ]; then
-              echo "SKIP $f - tidak ada di vlxlxlv"
-              SKIPPED=$((SKIPPED+1)); continue
+            if [ ! -f "$BASE" ] || [ ! -f "$TGT" ]; then
+              echo "△ Skip $f — tidak ditemukan di salah satu tree"
+              SKIPPED=$((SKIPPED+1))
+              continue
             fi
 
-            diff -u "$BASE" "$SRC" \
+            diff -u "$BASE" "$TGT" \
               --label "a/$f" \
               --label "b/$f" \
               > "$OUT" || true
@@ -245,283 +156,163 @@ jobs:
             if [ -s "$OUT" ]; then
               LINES=$(wc -l < "$OUT")
               HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
-              ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
-              DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
-
-              if [ "${{ inputs.skip_large_files }}" = "true" ] && [ "$LINES" -gt 5000 ]; then
-                echo "SKIP_LARGE $PNAME ($LINES lines > 5000)"
-                rm -f "$OUT"; continue
-              fi
-
-              echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
+              ADDS=$(grep -c "^+" "$OUT" 2>/dev/null || echo 0)
+              DELS=$(grep -c "^-" "$OUT" 2>/dev/null || echo 0)
+              echo "✓ $PNAME"
+              echo "  Lines: $LINES | Hunks: $HUNKS | +$ADDS / -$DELS"
               GENERATED=$((GENERATED+1))
             else
-              echo "IDENTICAL $f - tidak ada diff"
+              echo "○ $f — identical, skip"
               rm -f "$OUT"
               SKIPPED=$((SKIPPED+1))
             fi
           done
 
           echo ""
-          echo "Binder summary: $GENERATED generated, $SKIPPED skipped"
+          echo "══════════════════════════════════════════════════"
+          echo " Summary: $GENERATED generated, $SKIPPED skipped"
+          echo "══════════════════════════════════════════════════"
+          ls -lah $GITHUB_WORKSPACE/kernel-patches/zram-multicomp-*.patch 2>/dev/null \
+            || echo "No patches generated"
 
-      # -----------------------------------------------------------------
-      # 7. Generate kernfs patches
-      # -----------------------------------------------------------------
-      - name: Generate kernfs patches
-        if: >-
-          ${{ contains(inputs.patch_target, 'kernfs') ||
-              inputs.patch_target == 'ALL' }}
-        run: |
-          echo "=== Generating KERNFS patches ==="
-          GENERATED=0
-          SKIPPED=0
-
-          KERNFS_FILES=(
-            "fs/kernfs/dir.c"
-            "fs/kernfs/file.c"
-            "fs/kernfs/inode.c"
-            "fs/kernfs/mount.c"
-            "fs/kernfs/symlink.c"
-            "fs/kernfs/kernfs-internal.h"
-            "include/linux/kernfs.h"
-          )
-
-          for f in "${KERNFS_FILES[@]}"; do
-            BASE="/tmp/base-a12/$f"
-            SRC="/tmp/vlxlxlv/$f"
-            PNAME="kernfs-$(echo "$f" | tr '/' '-').patch"
-            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
-
-            if [ ! -f "$BASE" ]; then
-              echo "SKIP $f - tidak ada di baseline"
-              SKIPPED=$((SKIPPED+1)); continue
-            fi
-            if [ ! -f "$SRC" ]; then
-              echo "SKIP $f - tidak ada di vlxlxlv"
-              SKIPPED=$((SKIPPED+1)); continue
-            fi
-
-            diff -u "$BASE" "$SRC" \
-              --label "a/$f" \
-              --label "b/$f" \
-              > "$OUT" || true
-
-            if [ -s "$OUT" ]; then
-              LINES=$(wc -l < "$OUT")
-              HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
-              ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
-              DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
-              echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
-              GENERATED=$((GENERATED+1))
-            else
-              echo "IDENTICAL $f - tidak ada diff"
-              rm -f "$OUT"
-              SKIPPED=$((SKIPPED+1))
-            fi
-          done
-
-          echo ""
-          echo "kernfs summary: $GENERATED generated, $SKIPPED skipped"
-
-      # -----------------------------------------------------------------
-      # 8. Generate Futex patches
-      # -----------------------------------------------------------------
-      - name: Generate Futex patches
-        if: >-
-          ${{ inputs.patch_target == 'futex' ||
-              inputs.patch_target == 'ALL' }}
-        run: |
-          echo "=== Generating FUTEX patches ==="
-          GENERATED=0
-          SKIPPED=0
-
-          # -- Header files --
-          for f in \
-            "include/linux/futex.h" \
-            "include/uapi/linux/futex.h"; do
-
-            BASE="/tmp/base-a12/$f"
-            SRC="/tmp/source-a13/$f"
-            PNAME="futex-$(echo "$f" | tr '/' '-').patch"
-            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
-
-            if [ ! -f "$BASE" ] || [ ! -f "$SRC" ]; then
-              echo "SKIP $f - tidak ditemukan"
-              SKIPPED=$((SKIPPED+1)); continue
-            fi
-
-            diff -u "$BASE" "$SRC" \
-              --label "a/$f" \
-              --label "b/$f" \
-              > "$OUT" || true
-
-            if [ -s "$OUT" ]; then
-              LINES=$(wc -l < "$OUT")
-              HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
-              echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS"
-              GENERATED=$((GENERATED+1))
-            else
-              echo "IDENTICAL $f"
-              rm -f "$OUT"
-              SKIPPED=$((SKIPPED+1))
-            fi
-          done
-
-          # -- kernel/futex source - deteksi split atau single file --
-          echo ""
-          echo "--- Handling kernel/futex source ---"
-
-          if [ -d /tmp/source-a13/kernel/futex ] && [ ! -f /tmp/source-a13/kernel/futex.c ]; then
-            echo "android13-5.10 pakai kernel/futex/ direktori - diff per file"
-
-            for src_f in /tmp/source-a13/kernel/futex/*.c /tmp/source-a13/kernel/futex/*.h; do
-              [ -f "$src_f" ] || continue
-              FNAME=$(basename "$src_f")
-              PNAME="futex-kernel-futex-${FNAME}.patch"
-              OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
-              BASE_F="/tmp/base-a12/kernel/futex/$FNAME"
-
-              if [ ! -f "$BASE_F" ]; then
-                echo "  NEW_FILE $FNAME (file baru di a13, diff dari /dev/null)"
-                diff -u /dev/null "$src_f" \
-                  --label "a/kernel/futex/$FNAME" \
-                  --label "b/kernel/futex/$FNAME" \
-                  > "$OUT" || true
-              else
-                diff -u "$BASE_F" "$src_f" \
-                  --label "a/kernel/futex/$FNAME" \
-                  --label "b/kernel/futex/$FNAME" \
-                  > "$OUT" || true
-              fi
-
-              if [ -s "$OUT" ]; then
-                LINES=$(wc -l < "$OUT")
-                HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
-                ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
-                DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
-
-                if [ "${{ inputs.skip_large_files }}" = "true" ] && [ "$LINES" -gt 5000 ]; then
-                  echo "  SKIP_LARGE $PNAME ($LINES lines)"
-                  rm -f "$OUT"; continue
-                fi
-
-                echo "  DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
-                GENERATED=$((GENERATED+1))
-              else
-                echo "  IDENTICAL $FNAME"
-                rm -f "$OUT"
-                SKIPPED=$((SKIPPED+1))
-              fi
-            done
-
-          else
-            echo "android13-5.10 masih pakai kernel/futex.c single file"
-            BASE="/tmp/base-a12/kernel/futex.c"
-            SRC="/tmp/source-a13/kernel/futex.c"
-            PNAME="futex-kernel-futex.c.patch"
-            OUT="$GITHUB_WORKSPACE/kernel-patches/$PNAME"
-
-            if [ ! -f "$BASE" ] || [ ! -f "$SRC" ]; then
-              echo "SKIP kernel/futex.c - tidak ditemukan"
-              SKIPPED=$((SKIPPED+1))
-            else
-              diff -u "$BASE" "$SRC" \
-                --label "a/kernel/futex.c" \
-                --label "b/kernel/futex.c" \
-                > "$OUT" || true
-
-              if [ -s "$OUT" ]; then
-                LINES=$(wc -l < "$OUT")
-                HUNKS=$(grep -c "^@@" "$OUT" 2>/dev/null || echo 0)
-                ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
-                DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
-
-                if [ "${{ inputs.skip_large_files }}" = "true" ] && [ "$LINES" -gt 5000 ]; then
-                  echo "SKIP_LARGE $PNAME ($LINES lines)"
-                  rm -f "$OUT"
-                else
-                  echo "DONE $PNAME | Lines:$LINES Hunks:$HUNKS +$ADDS/-$DELS"
-                  GENERATED=$((GENERATED+1))
-                fi
-              else
-                echo "IDENTICAL kernel/futex.c"
-                rm -f "$OUT"
-                SKIPPED=$((SKIPPED+1))
-              fi
-            fi
-          fi
-
-          echo ""
-          echo "Futex summary: $GENERATED generated, $SKIPPED skipped"
-
-      # -----------------------------------------------------------------
-      # 9. Sanity check patch sizes
-      # -----------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # 6. Sanity check ukuran patch
+      # ---------------------------------------------------------------
       - name: Sanity check patch sizes
         run: |
           echo "=== Patch size check ==="
-          TOTAL=0
-          WARN=0
-
-          for p in "$GITHUB_WORKSPACE/kernel-patches/"*.patch; do
+          for p in $GITHUB_WORKSPACE/kernel-patches/zram-multicomp-*.patch; do
             [ -f "$p" ] || continue
-            NAME=$(basename "$p")
             LINES=$(wc -l < "$p")
-            HUNKS=$(grep -c "^@@" "$p" 2>/dev/null || echo 0)
+            NAME=$(basename "$p")
 
-            if [ "$LINES" -gt 5000 ]; then
-              echo "WARN_LARGE  $NAME : ${LINES}L / ${HUNKS} hunks - review manual!"
-              WARN=$((WARN+1))
-            elif [ "$LINES" -gt 2000 ]; then
-              echo "WARN_MEDIUM $NAME : ${LINES}L / ${HUNKS} hunks - disarankan review"
+            if [ $LINES -gt 3000 ]; then
+              echo "⚠  $NAME: $LINES lines — BESAR (kemungkinan zram_drv.c), review manual wajib"
+            elif [ $LINES -gt 800 ]; then
+              echo "△  $NAME: $LINES lines — cukup besar, review disarankan"
             else
-              echo "OK          $NAME : ${LINES}L / ${HUNKS} hunks"
+              echo "✓  $NAME: $LINES lines — ok"
             fi
-            TOTAL=$((TOTAL+1))
           done
 
-          if [ "$TOTAL" -eq 0 ]; then
-            echo ""
-            echo "NOTICE: Tidak ada patch yang di-generate."
-            echo "Kemungkinan semua file identical antara baseline dan source."
-            echo "Cek log step Audit di atas untuk detail."
-          else
-            echo ""
-            echo "Total: $TOTAL patch(es), $WARN dengan warning besar"
-          fi
-
-      # -----------------------------------------------------------------
-      # 10. Upload patches sebagai artifact (download dari tab Actions)
-      # -----------------------------------------------------------------
-      - name: Upload patches as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backport-patches-${{ inputs.patch_target }}-run${{ github.run_number }}
-          path: ${{ github.workspace }}/kernel-patches/*.patch
-          if-no-files-found: warn
-          retention-days: 14
-
-      # -----------------------------------------------------------------
-      # 11. Dry-run test terhadap fork kernel kita
-      # -----------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # 7. Dry-run: test apply ke fork kita
+      # ---------------------------------------------------------------
       - name: Dry-run test patches against our kernel fork
         run: |
-          echo "=== DRY-RUN TEST ==="
-          echo "Target: whiskiesweet/android_kernel_common-5.10"
-          echo "Branch: ${{ inputs.our_kernel_branch }}"
-          echo ""
+          echo "=== Dry-run test: apply ke whiskiesweet/android_kernel_common-5.10 ==="
 
-          PATCH_COUNT=$(find "$GITHUB_WORKSPACE/kernel-patches" \
-            -maxdepth 1 -name '*.patch' -type f 2>/dev/null | wc -l)
+          git clone --depth=1 \
+            --branch android12-5.10 \
+            https://github.com/whiskiesweet/android_kernel_common-5.10 \
+            /tmp/our-kernel
 
-          if [ "$PATCH_COUNT" -eq 0 ]; then
-            echo "Tidak ada patch untuk di-test, skip."
-            exit 0
-          fi
-          # ... (sisa script tidak perlu diubah)
+          PASS=0
+          FAIL=0
+          FUZZY=0
 
-          PATCH_COUNT=0
-          for p in "$GITHUB_WORKSPACE/kernel-patches/"*.patch; do
-            [ -f "$p" ] && PATCH_COUNT=$((PATCH_COUNT+1))   ← biang masalah
+          for p in $GITHUB_WORKSPACE/kernel-patches/zram-multicomp-*.patch; do
+            [ -f "$p" ] || continue
+            NAME=$(basename "$p")
+
+            echo ""
+            echo "--- Testing $NAME ---"
+
+            if patch -p1 --dry-run -d /tmp/our-kernel < "$p" > /tmp/patch-test.log 2>&1; then
+              echo "✓ Applies cleanly"
+              PASS=$((PASS+1))
+            else
+              if patch -p1 --dry-run --fuzz=3 -d /tmp/our-kernel < "$p" >> /tmp/patch-test.log 2>&1; then
+                echo "△ Applies dengan --fuzz=3 (minor offset)"
+                grep -E "HUNK|offset|fuzz" /tmp/patch-test.log | head -10
+                FUZZY=$((FUZZY+1))
+              else
+                echo "✗ CONFLICT DETECTED"
+                tail -15 /tmp/patch-test.log
+                FAIL=$((FAIL+1))
+              fi
+            fi
           done
+
+          echo ""
+          echo "══════════════════════════════════════════════════"
+          echo " Dry-run results:"
+          echo "   ✓ Clean : $PASS"
+          echo "   △ Fuzzy : $FUZZY"
+          echo "   ✗ Failed: $FAIL"
+          echo "══════════════════════════════════════════════════"
+
+          if [ $FAIL -gt 0 ]; then
+            echo ""
+            echo "⚠ Ada $FAIL patch yang conflict — ini WAJAR untuk zram_drv.c/h"
+            echo "  karena 5.10 punya perbedaan dari baseline mainline v6.1"
+            echo "  (Android-specific writeback, dll)."
+            echo ""
+            echo "  Rekomendasi urutan resolve manual:"
+            echo "    1. Kconfig & zcomp.h/zcomp.c — biasanya clean/fuzzy saja"
+            echo "    2. zram_drv.h — resolve struct zram & enum zram_pageflags dulu"
+            echo "       (cek ZRAM_FLAG_SHIFT supaya ZRAM_RECOMP_PENDING/"
+            echo "       ZRAM_INCOMPRESSIBLE tidak bertabrakan dengan bit existing)"
+            echo "    3. zram_drv.c paling akhir, per-fungsi (jangan sekaligus)"
+          fi
+
+          # Jangan gagalkan workflow karena conflict — biarkan user decide
+          exit 0
+
+      # ---------------------------------------------------------------
+      # 8. Commit patch ke repo kita (skip jika dry_run=true)
+      # ---------------------------------------------------------------
+      - name: Checkout Azure-Kernel-Builder (push target)
+        if: ${{ !inputs.dry_run }}
+        uses: actions/checkout@v4
+        with:
+          repository: whiskiesweet/Azure-Kernel-Builder
+          ref: main
+          path: builder
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Commit patches to Azure-Kernel-Builder
+        if: ${{ !inputs.dry_run }}
+        run: |
+          BUILDER="$GITHUB_WORKSPACE/builder"
+          cd "$BUILDER"
+
+          git config user.name  "whiskiesweet"
+          git config user.email "noreply@github.com"
+
+          mkdir -p kernel-patches
+
+          git rm -f kernel-patches/zram-multicomp-*.patch 2>/dev/null || true
+
+          echo "=== Source patches ==="
+          ls "$GITHUB_WORKSPACE/kernel-patches/"zram-multicomp-*.patch
+
+          cp "$GITHUB_WORKSPACE"/kernel-patches/zram-multicomp-*.patch \
+            kernel-patches/
+
+          git add kernel-patches/zram-multicomp-*.patch
+
+          if git diff --cached --quiet; then
+            echo "△ Tidak ada perubahan — patch sudah terbaru"
+          else
+            BASE_SHA=$(git -C /tmp/base-zram log --oneline -1)
+            TARGET_SHA=$(git -C /tmp/target-zram log --oneline -1)
+            PATCH_LIST=$(ls kernel-patches/zram-multicomp-*.patch 2>/dev/null \
+              | xargs -I{} basename {} | tr '\n' ' ')
+
+            git commit -m "kernel-patches: add ZRAM multi-comp diff (${{ inputs.base_tag }} -> ${{ inputs.target_tag }})
+
+            Source: github.com/torvalds/linux drivers/block/zram/
+            ${{ inputs.base_tag }} : $BASE_SHA
+            ${{ inputs.target_tag }} : $TARGET_SHA
+
+            Patches: $PATCH_LIST
+
+            NOTE: butuh resolve manual saat apply ke android12-5.10,
+            terutama zram_drv.c/h. Jalankan KMI_function_symbols_test.py
+            setelah apply."
+
+            git push origin main
+            echo "✓ Pushed ke Azure-Kernel-Builder/main"
+          fi
+          
