@@ -1,0 +1,738 @@
+
+
+name: Fetch MGLRU Backport Patches (android14-5.10)
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      patch_mode:
+        description: 'Mode fetch patches'
+        type: choice
+        options:
+          - commit-based
+          - diff-full
+        default: commit-based
+
+      source_branch:
+        description: 'Branch sumber MGLRU (android14-5.10 direkomendasikan)'
+        type: string
+        default: android14-5.10
+
+      base_branch:
+        description: 'Branch base / fork kita (tanpa MGLRU)'
+        type: string
+        default: android12-5.10
+
+      kernel_branch:
+        description: 'Branch fork kernel untuk dry-run test'
+        type: string
+        default: android12-5.10
+
+      commit_keywords:
+        description: '[commit-based] Keywords cari MGLRU commits (pisah | untuk OR)'
+        type: string
+        default: 'LRU_GEN|multi-gen LRU|lru_gen_|MGLRU|multi_gen_lru|lru_gen_enabled'
+
+      depth_months:
+        description: 'Seberapa jauh clone history (months, untuk commit-based)'
+        type: string
+        default: '24'
+
+      dry_run:
+        description: 'Dry run — generate & test tapi JANGAN commit ke repo'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-mglru-patches:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ────────────────────────────────────────────────────────────────────────
+      # 1. Checkout repo ini
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Checkout Azure-Kernel-Builder
+        uses: actions/checkout@v4
+        with:
+          repository: whiskiesweet/Azure-Kernel-Builder
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup workspace
+        run: |
+          git config user.name  "whiskiesweet"
+          git config user.email "noreply@github.com"
+
+          mkdir -p mglru-patches
+
+          echo "PATCH_DIR=$GITHUB_WORKSPACE/mglru-patches" >> $GITHUB_ENV
+          echo "SRC_BRANCH=${{ inputs.source_branch }}"    >> $GITHUB_ENV
+          echo "BASE_BRANCH=${{ inputs.base_branch }}"     >> $GITHUB_ENV
+
+          echo "════════════════════════════════════════════"
+          echo " Mode     : ${{ inputs.patch_mode }}"
+          echo " Source   : ${{ inputs.source_branch }}"
+          echo " Base     : ${{ inputs.base_branch }}"
+          echo " Dry run  : ${{ inputs.dry_run }}"
+          echo "════════════════════════════════════════════"
+
+
+      # ══════════════════════════════════════════════════════════════════════
+      #  MODE: commit-based
+      #  Clone android14-5.10, cari commits MGLRU, generate format-patch
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "[commit-based] Clone android14-5.10 dengan git history"
+        if: inputs.patch_mode == 'commit-based'
+        run: |
+          AOSP_BASE="https://android.googlesource.com/kernel/common"
+          SRC_BRANCH="${{ inputs.source_branch }}"
+          MONTHS="${{ inputs.depth_months }}"
+
+          # Hitung tanggal shallow-since (MONTHS bulan lalu)
+          SINCE_DATE=$(date -d "$MONTHS months ago" '+%Y-%m-%d' 2>/dev/null \
+                       || python3 -c "
+          from datetime import datetime, timedelta
+          d = datetime.now() - timedelta(days=int('$MONTHS')*30)
+          print(d.strftime('%Y-%m-%d'))
+          ")
+
+          echo "Cloning $SRC_BRANCH (sparse: mm/ include/linux/ kernel/)"
+          echo "Shallow since: $SINCE_DATE ($MONTHS months ago)"
+
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            --shallow-since="$SINCE_DATE" \
+            "$AOSP_BASE" \
+            /tmp/mglru-src
+
+          cd /tmp/mglru-src
+          git sparse-checkout init --cone
+          git sparse-checkout set mm include/linux kernel
+
+          # Fetch branch target
+          git fetch --update-shallow origin \
+            "refs/heads/$SRC_BRANCH:refs/heads/$SRC_BRANCH" \
+            || {
+              echo "⚠ Fetch branch gagal — fallback fetch tanpa shallow"
+              git fetch origin "$SRC_BRANCH"
+            }
+
+          git checkout "$SRC_BRANCH" 2>/dev/null \
+            || git checkout -b "$SRC_BRANCH" "origin/$SRC_BRANCH" 2>/dev/null \
+            || { echo "❌ Gagal checkout $SRC_BRANCH"; exit 1; }
+
+          echo ""
+          echo "✓ Source siap:"
+          echo "  HEAD   : $(git log --oneline -1)"
+          echo "  MGLRU? : $(grep -c 'LRU_GEN\|lru_gen_' mm/Kconfig 2>/dev/null || echo 0) Kconfig entries"
+
+          # Cek apakah ini memang branch yang punya MGLRU
+          if ! grep -q "LRU_GEN" mm/Kconfig 2>/dev/null; then
+            echo ""
+            echo "⚠  PERINGATAN: Branch $SRC_BRANCH TIDAK punya LRU_GEN di mm/Kconfig!"
+            echo "   Kemungkinan branch ini belum punya MGLRU backport."
+            echo "   Saran: coba source_branch = android15-5.10"
+          fi
+
+      - name: "[commit-based] Clone base (android12-5.10) untuk menentukan range"
+        if: inputs.patch_mode == 'commit-based'
+        run: |
+          AOSP_BASE="https://android.googlesource.com/kernel/common"
+          BASE_BRANCH="${{ inputs.base_branch }}"
+
+          echo "Cloning base $BASE_BRANCH (shallow depth=1) ..."
+
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            --depth=1 \
+            "$AOSP_BASE" \
+            /tmp/mglru-base
+
+          cd /tmp/mglru-base
+          git sparse-checkout init --cone
+          git sparse-checkout set mm
+
+          git fetch origin "refs/heads/$BASE_BRANCH:refs/heads/$BASE_BRANCH" 2>/dev/null \
+            || git fetch origin "$BASE_BRANCH"
+
+          git checkout "$BASE_BRANCH" 2>/dev/null \
+            || git checkout -b "$BASE_BRANCH" "origin/$BASE_BRANCH"
+
+          BASE_COMMIT=$(git rev-parse HEAD)
+          echo "MGLRU_BASE_COMMIT=$BASE_COMMIT" >> $GITHUB_ENV
+          echo "✓ Base commit: $BASE_COMMIT"
+          echo "  HEAD: $(git log --oneline -1)"
+
+      - name: "[commit-based] Cari & extract MGLRU commits"
+        if: inputs.patch_mode == 'commit-based'
+        run: |
+          cd /tmp/mglru-src
+
+          KEYWORDS="${{ inputs.commit_keywords }}"
+          SRC_BRANCH="${{ inputs.source_branch }}"
+          BASE_BRANCH="${{ inputs.base_branch }}"
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo " Mencari MGLRU commits di $SRC_BRANCH yang tidak ada di $BASE_BRANCH"
+          echo " Keywords: $KEYWORDS"
+          echo "═══════════════════════════════════════════════════════════"
+
+          # Fetch base branch ke local untuk determine range
+          git fetch https://android.googlesource.com/kernel/common \
+            "refs/heads/$BASE_BRANCH:refs/remotes/base/$BASE_BRANCH" \
+            2>/dev/null || echo "△ Tidak bisa fetch base untuk range comparison"
+
+          # Cari commits MGLRU
+          ALL_COMMITS=""
+
+          IFS='|' read -ra KW_LIST <<< "$KEYWORDS"
+          for KW in "${KW_LIST[@]}"; do
+            KW=$(echo "$KW" | xargs)
+            echo -n "  '$KW' → "
+
+            # Cari di seluruh history sparse (mm/ include/linux/ kernel/)
+            FOUND=$(git log \
+              --pretty=format:"%H" \
+              --grep="$KW" \
+              --all \
+              -- mm/ include/linux/ kernel/sysctl.c \
+              2>/dev/null || true)
+
+            if [ -n "$FOUND" ]; then
+              COUNT=$(echo "$FOUND" | wc -l)
+              echo "$COUNT commits"
+              ALL_COMMITS="$ALL_COMMITS"$'\n'"$FOUND"
+            else
+              echo "0 commits"
+            fi
+          done
+
+          # Juga cari berdasarkan perubahan file MGLRU spesifik
+          echo ""
+          echo "  Cari via file-change tracking (mm/vmscan.c lru_gen section)..."
+          FILE_COMMITS=$(git log \
+            --pretty=format:"%H" \
+            --all \
+            -S "lru_gen_shrink_lruvec\|multi_gen_lru\|lru_gen_folio" \
+            -- mm/vmscan.c \
+            2>/dev/null || true)
+          if [ -n "$FILE_COMMITS" ]; then
+            echo "  lru_gen file-change → $(echo "$FILE_COMMITS" | wc -l) commits"
+            ALL_COMMITS="$ALL_COMMITS"$'\n'"$FILE_COMMITS"
+          fi
+
+          # Dedup + sort chronologically
+          UNIQUE_COMMITS=$(echo "$ALL_COMMITS" \
+            | sort -u | grep -v "^$" \
+            | xargs -I{} git log --pretty=format:"%ct %H" -1 {} 2>/dev/null \
+            | sort -n | awk '{print $2}')
+
+          TOTAL=$(echo "$UNIQUE_COMMITS" | grep -c "." || echo 0)
+          echo ""
+          echo "Total commits unik MGLRU: $TOTAL"
+
+          if [ -z "$UNIQUE_COMMITS" ] || [ "$TOTAL" -eq 0 ]; then
+            echo ""
+            echo "⚠  Tidak ada commits MGLRU ditemukan di $SRC_BRANCH!"
+            echo ""
+            echo "   Kemungkinan:"
+            echo "   1. Branch $SRC_BRANCH belum punya MGLRU backport"
+            echo "      → Coba: source_branch = android15-5.10"
+            echo "   2. Shallow history tidak cukup dalam"
+            echo "      → Coba: depth_months = 36"
+            echo "   3. Ganti patch_mode = diff-full"
+            exit 1
+          fi
+
+          echo ""
+          echo "MGLRU commits (oldest → newest = urutan apply):"
+          echo "─────────────────────────────────────────────────"
+          IDX=0
+          for C in $UNIQUE_COMMITS; do
+            IDX=$((IDX+1))
+            printf "%3d. %s\n" "$IDX" "$(git log --oneline -1 $C)"
+          done
+
+          # Generate format-patches
+          echo ""
+          echo "Generating format-patches..."
+          mkdir -p /tmp/mglru-patches
+          rm -f /tmp/mglru-patches/*.patch
+
+          GENERATED=0
+          IDX=0
+
+          for C in $UNIQUE_COMMITS; do
+            IDX=$((IDX+1))
+            SUBJECT=$(git log --pretty=format:"%f" -1 "$C" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed 's/[^a-z0-9-]/-/g' \
+              | sed 's/--*/-/g' \
+              | cut -c1-60)
+
+            PNAME="$(printf '%04d' $IDX)-${SUBJECT}.patch"
+            OUT="/tmp/mglru-patches/$PNAME"
+
+            git format-patch -1 "$C" \
+              --stdout \
+              -- mm/ include/linux/ kernel/sysctl.c \
+              > "$OUT" 2>/dev/null || true
+
+            if [ -s "$OUT" ]; then
+              LINES=$(wc -l < "$OUT")
+              echo "  ✓ $PNAME ($LINES lines)"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "  ○ $PNAME — kosong, dihapus"
+              rm -f "$OUT"
+            fi
+          done
+
+          # Copy ke workspace
+          rm -f "$PATCH_DIR"/[0-9][0-9][0-9][0-9]-*.patch
+          cp /tmp/mglru-patches/*.patch "$PATCH_DIR"/ 2>/dev/null || true
+
+          echo ""
+          echo "═══════════════════════════════════════════════════════════"
+          echo " commit-based: $GENERATED patches dihasilkan"
+          echo "═══════════════════════════════════════════════════════════"
+
+          [ "$GENERATED" -gt 0 ] || { echo "❌ Tidak ada patch!"; exit 1; }
+
+
+      # ══════════════════════════════════════════════════════════════════════
+      #  MODE: diff-full
+      #  Clone base & source (depth=1), generate per-file diff
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "[diff-full] Clone base android12-5.10 (depth=1, sparse)"
+        if: inputs.patch_mode == 'diff-full'
+        run: |
+          AOSP_BASE="https://android.googlesource.com/kernel/common"
+
+          git clone --filter=blob:none --no-checkout --depth=1 \
+            --branch "${{ inputs.base_branch }}" "$AOSP_BASE" /tmp/mglru-base
+
+          cd /tmp/mglru-base
+          git sparse-checkout init --cone
+          git sparse-checkout set mm include/linux kernel
+
+          git checkout "${{ inputs.base_branch }}"
+          echo "✓ Base: $(git log --oneline -1)"
+
+      - name: "[diff-full] Clone source android14-5.10 (depth=1, sparse)"
+        if: inputs.patch_mode == 'diff-full'
+        run: |
+          AOSP_BASE="https://android.googlesource.com/kernel/common"
+
+          git clone --filter=blob:none --no-checkout --depth=1 \
+            --branch "${{ inputs.source_branch }}" "$AOSP_BASE" /tmp/mglru-src
+
+          cd /tmp/mglru-src
+          git sparse-checkout init --cone
+          git sparse-checkout set mm include/linux kernel
+
+          git checkout "${{ inputs.source_branch }}"
+          echo "✓ Source: $(git log --oneline -1)"
+
+          # Verifikasi MGLRU ada di source
+          if ! grep -q "LRU_GEN" mm/Kconfig 2>/dev/null; then
+            echo ""
+            echo "⚠  LRU_GEN tidak ditemukan di mm/Kconfig branch ${{ inputs.source_branch }}!"
+            echo "   → Coba source_branch = android15-5.10"
+          fi
+
+      - name: "[diff-full] Generate per-file MGLRU diff patches"
+        if: inputs.patch_mode == 'diff-full'
+        run: |
+          GENERATED=0
+          IDENTICAL=0
+
+          # Hapus patches lama
+          rm -f "$PATCH_DIR"/mglru-*.patch
+
+          # Urutan KRITIS: header structs harus SEBELUM implementasi
+          for FILE in \
+            "include/linux/mmzone.h" \
+            "include/linux/mm_inline.h" \
+            "include/linux/mm_types.h" \
+            "mm/Kconfig" \
+            "mm/vmscan.c" \
+            "mm/workingset.c" \
+            "mm/memcontrol.c" \
+            "kernel/sysctl.c"; do
+
+            BASE_F="/tmp/mglru-base/$FILE"
+            SRC_F="/tmp/mglru-src/$FILE"
+            SAFE=$(echo "$FILE" | tr '/' '_')
+            OUT="$PATCH_DIR/mglru-${SAFE}.patch"
+
+            [ -f "$BASE_F" ] && [ -f "$SRC_F" ] || {
+              echo "  △ Skip $FILE"
+              continue
+            }
+
+            diff -u "$BASE_F" "$SRC_F" \
+              --label "a/$FILE" --label "b/$FILE" \
+              > "$OUT" || true
+
+            if [ -s "$OUT" ]; then
+              LINES=$(wc -l < "$OUT")
+              ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
+              DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
+              echo "  ✓ $FILE → $LINES lines (+$ADDS/-$DELS)"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "  ○ $FILE → identik"
+              rm -f "$OUT"
+              IDENTICAL=$((IDENTICAL+1))
+            fi
+          done
+
+          echo ""
+          echo "diff-full: $GENERATED generated, $IDENTICAL identical"
+          [ "$GENERATED" -gt 0 ] || { echo "❌ Semua file identik!"; exit 1; }
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Audit patches (semua mode)
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Audit MGLRU patches & KMI impact check
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " AUDIT MGLRU PATCHES"
+          echo "══════════════════════════════════════════════════════════════"
+
+          PATCHES=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort)
+          [ -n "$PATCHES" ] || { echo "❌ Tidak ada patches!"; exit 1; }
+
+          TOTAL=$(echo "$PATCHES" | wc -l)
+          KMI_WARN=0
+          FOLIO_WARN=0
+
+          echo "Total patches: $TOTAL"
+          echo ""
+
+          for p in $PATCHES; do
+            NAME=$(basename "$p")
+            LINES=$(wc -l < "$p")
+            echo "┌─ $NAME ($LINES lines)"
+
+            # Cek MGLRU symbols utama
+            MGLRU_HITS=$(grep -c \
+              "lru_gen_\|LRU_GEN\|multi_gen_lru\|lruvec.*gen\|lru_gen_enabled" \
+              "$p" 2>/dev/null || echo 0)
+            echo "│  MGLRU symbols: $MGLRU_HITS"
+
+            # Cek folio dependency (WARNING kalau ada)
+            FOLIO_HITS=$(grep "^+.*folio_\|^+.*struct folio" \
+              "$p" 2>/dev/null | grep -v "^+++ " | wc -l || echo 0)
+            if [ "$FOLIO_HITS" -gt 0 ]; then
+              echo "│  ⚠  FOLIO: $FOLIO_HITS folio refs di patches baru"
+              echo "│     Artinya: source branch ini masih pakai folio API"
+              echo "│     → Butuh manual adaptation (ganti folio → page)"
+              FOLIO_WARN=$((FOLIO_WARN+1))
+            else
+              echo "│  ✓  No folio refs — compat 5.10"
+            fi
+
+            # Cek EXPORT_SYMBOL (potensi KMI impact)
+            EXPORTS=$(grep "^+.*EXPORT_SYMBOL" "$p" 2>/dev/null \
+              | grep -v "^+++ " || true)
+            if [ -n "$EXPORTS" ]; then
+              echo "│  ⚠  KMI: EXPORT_SYMBOL additions:"
+              echo "$EXPORTS" | head -3 | sed 's/^/│    /'
+              KMI_WARN=$((KMI_WARN+1))
+            fi
+
+            echo "└──"
+          done
+
+          echo ""
+          if [ "$FOLIO_WARN" -gt 0 ]; then
+            echo "══════════════════════════════════════════════════════════════"
+            echo " ⚠  $FOLIO_WARN patches punya folio references!"
+            echo ""
+            echo " INI BERARTI: Source branch ${{ inputs.source_branch }}"
+            echo " menggunakan struct folio (5.16+ API), tidak compat langsung"
+            echo " dengan android12-5.10."
+            echo ""
+            echo " SOLUSI:"
+            echo "   1. Coba source_branch = android13-5.10 atau android14-5.10"
+            echo "      (branch yang lebih dekat ke 5.10 base, mungkin no-folio)"
+            echo ""
+            echo "   2. Manual adaptation di GitHub editor:"
+            echo "      Ganti setiap 'folio_*' dengan 'page_*' equivalentnya"
+            echo "      Map konversi ada di mglru-source/README.md"
+            echo ""
+            echo "   3. Lihat file mglru-source/diff/ untuk panduan perubahan"
+            echo "══════════════════════════════════════════════════════════════"
+          else
+            echo "✅ Tidak ada folio dependency — patches compat dengan 5.10!"
+          fi
+
+          if [ "$KMI_WARN" -gt 0 ]; then
+            echo ""
+            echo "⚠  $KMI_WARN patches add EXPORT_SYMBOL → periksa KMI!"
+          fi
+
+          echo "FOLIO_WARN=$FOLIO_WARN"   >> $GITHUB_ENV
+          echo "KMI_WARN=$KMI_WARN"       >> $GITHUB_ENV
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Clone kernel fork & dry-run test
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Clone kernel fork untuk dry-run
+        run: |
+          git clone --depth=1 \
+            --branch "${{ inputs.kernel_branch }}" \
+            https://github.com/whiskiesweet/kernel_common_5.10.git \
+            /tmp/our-kernel
+
+          echo "✓ Fork: $(git -C /tmp/our-kernel log --oneline -1)"
+
+          # Cek status MGLRU di fork
+          VMSCAN_MGLRU=$(grep -c "lru_gen_\|LRU_GEN" \
+            /tmp/our-kernel/mm/vmscan.c 2>/dev/null || echo 0)
+          echo "  vmscan.c MGLRU refs: $VMSCAN_MGLRU"
+          echo "OUR_KERNEL=/tmp/our-kernel" >> $GITHUB_ENV
+
+      - name: Dry-run test patches ke fork kernel
+        id: dryrun
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " DRY-RUN: Apply MGLRU patches ke android12-5.10 (simulasi)"
+          echo "══════════════════════════════════════════════════════════════"
+
+          PATCHES=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort)
+          [ -n "$PATCHES" ] || { echo "Tidak ada patches."; exit 0; }
+
+          PASS=0; FUZZY=0; FAIL=0
+          FAIL_NAMES=""
+
+          for p in $PATCHES; do
+            NAME=$(basename "$p")
+            echo ""
+            echo "─── $NAME ───"
+            > /tmp/dry.log
+
+            if [ "${{ inputs.patch_mode }}" = "commit-based" ]; then
+              TEST_CMD="git -C $OUR_KERNEL apply --check"
+              FUZZ_CMD="git -C $OUR_KERNEL apply --check --3way"
+              CMD_REDIR="< $p"
+            else
+              TEST_CMD="patch -p1 --dry-run -d $OUR_KERNEL"
+              FUZZ_CMD="patch -p1 --dry-run --fuzz=3 -d $OUR_KERNEL"
+              CMD_REDIR="< $p"
+            fi
+
+            if $TEST_CMD < "$p" > /tmp/dry.log 2>&1; then
+              echo "  ✓ CLEAN"
+              PASS=$((PASS+1))
+            elif $FUZZ_CMD < "$p" >> /tmp/dry.log 2>&1; then
+              FUZZ_DETAIL=$(grep -E "HUNK|offset|fuzz" /tmp/dry.log | head -3 || true)
+              echo "  △ FUZZY (minor offset — masih aman)"
+              [ -n "$FUZZ_DETAIL" ] && echo "$FUZZ_DETAIL" | sed 's/^/    /'
+              FUZZY=$((FUZZY+1))
+            else
+              echo "  ✗ CONFLICT:"
+              grep -E "error:|FAILED|can't find|does not apply|Hunk #" \
+                /tmp/dry.log | head -8 | sed 's/^/    /' || true
+              FAIL=$((FAIL+1))
+              FAIL_NAMES="$FAIL_NAMES $NAME"
+            fi
+          done
+
+          echo ""
+          echo "══════════════════════════════════════════════════════════════"
+          echo " Dry-run Result:"
+          echo "   ✓ Clean    : $PASS  → langsung bisa dipakai di build"
+          echo "   △ Fuzzy    : $FUZZY  → bisa dipakai, minor adjustment"
+          echo "   ✗ Conflict : $FAIL  → perlu review manual"
+          echo "══════════════════════════════════════════════════════════════"
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo ""
+            echo "Patches CONFLICT:"
+            for N in $FAIL_NAMES; do echo "  ✗ $N"; done
+            echo ""
+            echo "═══ Cara resolve tanpa laptop ═══"
+            echo ""
+            echo "OPSI 1 (MUDAH) — Edit file langsung di GitHub:"
+            echo "  1. Buka github.com/whiskiesweet/android_kernel_common-5.10"
+            echo "  2. Navigate ke file yang conflict (contoh: mm/vmscan.c)"
+            echo "  3. Klik tombol edit (pensil)"
+            echo "  4. Lihat diff patch di mglru-source/diff/ sebagai panduan"
+            echo "  5. Tambah kode MGLRU yang relevan secara manual"
+            echo "  6. Commit langsung via GitHub web"
+            echo ""
+            echo "OPSI 2 — Ganti ke diff-full mode:"
+            echo "  → patch_mode = diff-full (lebih toleran terhadap context)"
+            echo ""
+            echo "OPSI 3 — Apply partial (skip yang conflict):"
+            echo "  → Di build-kernel.yml, tambah 'continue-on-error: true'"
+            echo "    untuk step apply patches"
+          fi
+
+          echo "DRY_PASS=$PASS"   >> $GITHUB_ENV
+          echo "DRY_FUZZY=$FUZZY" >> $GITHUB_ENV
+          echo "DRY_FAIL=$FAIL"   >> $GITHUB_ENV
+          exit 0
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Generate panduan integrasi dengan build-kernel.yml
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Generate build integration guide
+        run: |
+          PATCH_COUNT=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | wc -l || echo 0)
+          MODE="${{ inputs.patch_mode }}"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << SUMEOF
+          # 📦 MGLRU Patches Ready
+
+          ## Status
+          | Item | Value |
+          |------|-------|
+          | Source branch | \`$SRC_BRANCH\` |
+          | Patches generated | $PATCH_COUNT |
+          | Dry-run | ✓$DRY_PASS clean / △$DRY_FUZZY fuzzy / ✗$DRY_FAIL conflict |
+          | Folio warnings | $FOLIO_WARN |
+          | KMI warnings | $KMI_WARN |
+
+          ## Integrasi ke build-kernel.yml
+
+          Tambahkan step berikut di \`build-kernel.yml\` **setelah** step "Checkout Kernel Source"
+          dan **sebelum** step "Run build.sh":
+
+          \`\`\`yaml
+          # ── Apply MGLRU Backport Patches ──────────────────────────────────────────
+          - name: Apply MGLRU backport patches
+            working-directory: kernel
+            run: |
+              PATCH_DIR="\$GITHUB_WORKSPACE/../Azure-Kernel-Builder/mglru-patches"
+              PATCHES=\$(ls "\$PATCH_DIR"/*.patch 2>/dev/null | sort)
+
+              if [ -z "\$PATCHES" ]; then
+                echo "△ Tidak ada MGLRU patches ditemukan — skip"
+                exit 0
+              fi
+
+              PASS=0; FAIL=0
+
+              for p in \$PATCHES; do
+                NAME=\$(basename "\$p")
+                echo "Applying: \$NAME"
+
+          $(if [ "$MODE" = "commit-based" ]; then
+          echo "          # commit-based: gunakan git apply"
+          echo "          if git apply \"\$p\" 2>/dev/null; then"
+          echo "            echo \"  ✓ Applied\""
+          echo "            PASS=\$((PASS+1))"
+          echo "          elif git apply --3way \"\$p\" 2>/dev/null; then"
+          echo "            echo \"  △ Applied with 3way merge\""
+          echo "            PASS=\$((PASS+1))"
+          echo "          else"
+          echo "            echo \"  ✗ FAILED: \$NAME\""
+          echo "            FAIL=\$((FAIL+1))"
+          echo "          fi"
+          else
+          echo "          # diff-full: gunakan patch -p1"
+          echo "          if patch -p1 < \"\$p\" 2>/dev/null; then"
+          echo "            echo \"  ✓ Applied\""
+          echo "            PASS=\$((PASS+1))"
+          echo "          elif patch -p1 --fuzz=3 < \"\$p\" 2>/dev/null; then"
+          echo "            echo \"  △ Applied with fuzz\""
+          echo "            PASS=\$((PASS+1))"
+          echo "          else"
+          echo "            echo \"  ✗ FAILED: \$NAME\""
+          echo "            FAIL=\$((FAIL+1))"
+          echo "          fi"
+          fi)
+
+              done
+
+              echo ""
+              echo "MGLRU patches: \$PASS applied, \$FAIL failed"
+              [ "\$FAIL" -eq 0 ] || echo "⚠ \$FAIL patches gagal — cek log!"
+          \`\`\`
+
+          > **Catatan**: \`build.sh\` sudah punya \`-e LRU_GEN -e LRU_GEN_ENABLED -e LRU_GEN_STATS\` ✓
+          > Tidak perlu edit build.sh — hanya tambah step di atas.
+
+          ## File Location
+          Patches tersimpan di: \`mglru-patches/\` pada repo Azure-Kernel-Builder
+          SUMEOF
+
+          echo ""
+          echo "✓ Build integration guide ditulis ke GitHub Step Summary"
+          echo "  (Cek tab 'Summary' di workflow run ini)"
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Commit patches ke repo
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Final patch listing
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " FINAL MGLRU PATCHES"
+          echo "══════════════════════════════════════════════════════════════"
+          ls -lah "$PATCH_DIR"/*.patch 2>/dev/null || echo "Tidak ada patches!"
+          echo ""
+          echo "Source   : $SRC_BRANCH"
+          echo "Dry-run  : ✓$DRY_PASS △$DRY_FUZZY ✗$DRY_FAIL"
+          echo "Folio    : $FOLIO_WARN warnings"
+          echo ""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "ℹ  dry_run=true → TIDAK di-commit"
+          fi
+
+      - name: Commit mglru-patches/ ke Azure-Kernel-Builder
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          PATCH_COUNT=$(ls mglru-patches/*.patch 2>/dev/null | wc -l || echo 0)
+          [ "$PATCH_COUNT" -gt 0 ] || { echo "Tidak ada patches — skip"; exit 0; }
+
+          git add mglru-patches/
+          git diff --cached --quiet && { echo "△ Identik — skip"; exit 0; }
+
+          PATCH_FILES=$(ls mglru-patches/*.patch 2>/dev/null | xargs -I{} basename {} | tr '\n' ' ')
+
+          git commit -m "mglru-patches: MGLRU backport ${{ inputs.patch_mode }} ($SRC_BRANCH → $BASE_BRANCH)
+
+          Mode     : ${{ inputs.patch_mode }}
+          Source   : $SRC_BRANCH (android common kernel dengan MGLRU)
+          Base     : $BASE_BRANCH
+          Count    : $PATCH_COUNT patches
+          Folio    : $FOLIO_WARN folio warnings
+
+          Dry-run  : ✓$DRY_PASS clean | △$DRY_FUZZY fuzzy | ✗$DRY_FAIL conflict
+
+          File utama yang di-patch:
+            include/linux/mmzone.h    ← struct lruvec + lru_gen structs
+            include/linux/mm_inline.h ← lru_gen inline helpers
+            mm/Kconfig                ← CONFIG_LRU_GEN entries
+            mm/vmscan.c               ← INTI: multi-gen LRU reclaim
+            mm/workingset.c           ← refault distance tracking
+
+          CONFIG di build.sh sudah ada:
+            -e LRU_GEN -e LRU_GEN_ENABLED -e LRU_GEN_STATS ✓
+
+          Apply order: $PATCH_FILES"
+
+          git push origin main
+
+          echo ""
+          echo "✅ mglru-patches/ berhasil di-push ke Azure-Kernel-Builder/main"
+          echo "   Count : $PATCH_COUNT | Dry-run: ✓$DRY_PASS △$DRY_FUZZY ✗$DRY_FAIL"
