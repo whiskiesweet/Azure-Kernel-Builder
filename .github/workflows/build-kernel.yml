@@ -81,14 +81,6 @@ jobs:
           echo "AOSP Clang r536225 ready."
 
       # ── Mandi-Sa Clang 23 (LLVM 23.0.0 +binutils 2.45.1) ───────────────
-      - name: Cache Mandi-Sa Clang 23
-        if: matrix.clang == 'CLANGI-23'
-        id: cache-mandi-23
-        uses: actions/cache@v4
-        with:
-          path: ~/toolchain/mandi-clang
-          key: mandi-clang-llvm23-binutils2.45.1-20260601
-
       - name: Download Mandi-Sa Clang 23 (if not cached)
         if: matrix.clang == 'CLANG-23' && steps.cache-mandi-23.outputs.cache-hit != 'true'
         run: |
@@ -99,6 +91,14 @@ jobs:
           7z x /tmp/mandi-clang.7z -o"$HOME/toolchain/mandi-clang"
           rm -f /tmp/mandi-clang.7z
           echo "Mandi-Sa Clang 23 ready."
+          
+      - name: Cache Mandi-Sa Clang 23
+        if: matrix.clang == 'CLANGI-23'
+        id: cache-mandi-23
+        uses: actions/cache@v4
+        with:
+          path: ~/toolchain/mandi-clang
+          key: mandi-clang-llvm23-binutils2.45.1-20260601
 
       # ── Verify Selected Clang ────────────────────────────────────────────
       - name: Run Clang Audit Verification
