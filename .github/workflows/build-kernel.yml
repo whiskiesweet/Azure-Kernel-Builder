@@ -125,7 +125,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: 'whiskiesweet/kernel_common-5.10'
+          repository: 'whiskiesweet/kernel_common_5.10'
           ref: ${{ inputs.kernel_ref }} 
           path: 'kernel' 
           fetch-depth: 1 
