@@ -515,7 +515,7 @@ jobs:
 
       - name: Clone kernel fork untuk dry-run patch test
         run: |
-          echo "Cloning fork: whiskiesweet/android_kernel_common-5.10 ..."
+          echo "Cloning fork: whiskiesweet/kernel_common_5.10 ..."
 
           git clone --depth=1 \
             --branch "${{ inputs.kernel_branch }}" \
