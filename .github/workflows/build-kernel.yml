@@ -10,14 +10,14 @@ on:
           - KWS
           - KSUN
           - VNL
-        default: KWS
+        default: KSUN
       clang_variant:
         description: 'Clang toolchain Selection'
         type: choice
         options:
           - CLANG-19
           - CLANG-23
-        default: NEUTRON-19
+        default: CLANG-19
       kernel_name:
         description: 'Kernel base name'
         type: string
@@ -79,18 +79,6 @@ jobs:
             https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r536225.git \
             ~/toolchain/aosp-r536225
           echo "AOSP Clang r536225 ready."
-
-      # ── Neutron 19 ───────────────────────────────────────────────────────
-      - name: Download Neutron Clang 19
-        if: matrix.clang == 'NEUTRON-19'
-        run: |
-          mkdir -p ~/toolchain/neutron-clang
-          cd ~/toolchain/neutron-clang
-          curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
-          chmod +x antman
-          ./antman -S=10032024
-          ./antman --patch=glibc
-          echo "Neutron Clang 19 ready."
 
       # ── Mandi-Sa Clang 23 (LLVM 23.0.0 +binutils 2.45.1) ───────────────
       - name: Cache Mandi-Sa Clang 23
