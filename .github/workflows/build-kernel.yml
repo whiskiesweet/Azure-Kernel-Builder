@@ -125,7 +125,7 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: 'whiskiesweet/android_kernel_common-5.10'
+          repository: 'whiskiesweet/kernel_common_5.10'
           ref: ${{ inputs.kernel_ref }} 
           path: 'kernel' 
           fetch-depth: 1 
@@ -178,39 +178,7 @@ jobs:
           printf '\nCONFIG_LOCALVERSION="%s"\n' "$LOCALVER" \
             >> arch/arm64/configs/gki_defconfig
           echo "LOCALVERSION set to: $LOCALVER"
-      
-      # ── Apply MGLRU Backport Patches ──────────────────────────────────────
-      - name: Apply MGLRU backport patches
-        working-directory: kernel
-        run: |
-          PATCH_DIR="$GITHUB_WORKSPACE/mglru-patches"
-          PATCHES=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort)
-
-          if [ -z "$PATCHES" ]; then
-            echo "△ Tidak ada MGLRU patches — skip"
-            exit 0
-          fi
-
-          PASS=0; FAIL=0
-
-          for p in $PATCHES; do
-            NAME=$(basename "$p")
-            echo "Applying: $NAME"
-            if patch -p1 < "$p" 2>/dev/null; then
-              echo "  ✓ Applied"
-              PASS=$((PASS+1))
-            elif patch -p1 --fuzz=3 < "$p" 2>/dev/null; then
-              echo "  △ Applied with fuzz"
-              PASS=$((PASS+1))
-            else
-              echo "  ✗ FAILED: $NAME"
-              FAIL=$((FAIL+1))
-            fi
-          done
-
-          echo "MGLRU: $PASS applied, $FAIL failed"
-          [ "$FAIL" -eq 0 ] || { echo "⚠ Ada patches gagal!"; exit 1; }
-          
+             
       # ── Build ────────────────────────────────────────────────────────────
       - name: Run build.sh
         working-directory: kernel
