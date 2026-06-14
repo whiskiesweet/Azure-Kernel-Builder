@@ -526,7 +526,7 @@ jobs:
         run: |
           git clone --depth=1 \
             --branch "${{ inputs.kernel_branch }}" \
-            https://github.com/whiskiesweet/android_kernel_common-5.10.git \
+            https://github.com/whiskiesweet/kernel_common_5.10.git \
             /tmp/our-kernel
 
           echo "✓ Fork: $(git -C /tmp/our-kernel log --oneline -1)"
