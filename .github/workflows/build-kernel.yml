@@ -136,12 +136,20 @@ jobs:
         run: |
           PATCH_DIR="$GITHUB_WORKSPACE/bbr3-patches"
           for p in $(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort); do
-            echo "Applying: $(basename $p)"
+            NAME=$(basename "$p")
+
+            # Skip Kconfig — referensi subsystem mainline tidak ada di GKI
+            if echo "$NAME" | grep -q "Kconfig"; then
+              echo "△ Skip $NAME (Kconfig mainline tidak compat GKI)"
+              continue
+            fi
+
+            echo "Applying: $NAME"
             patch -p1 < "$p" || patch -p1 --fuzz=3 < "$p" || {
-              echo "✗ FAILED: $(basename $p)"; exit 1
+              echo "✗ FAILED: $NAME"; exit 1
             }
           done
-          echo "✅ BBR v3 applied"
+          echo "✅ BBR v3 applied (5 patches, Kconfig skipped)"
             
       # ── KSU setup ────────────────────────────────────────────────────────
       - name: Apply KernelSU (${{ matrix.ksu }})
