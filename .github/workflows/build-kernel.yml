@@ -134,13 +134,31 @@ jobs:
       - name: Apply BBR v3 patches
         working-directory: kernel
         run: |
+          # ── Inject compat macros untuk tcp.h dari BBR v3 ────────────────
+          # __cacheline_group_begin/end baru ada di Linux 6.1+
+          # Di 5.10 kita definisikan sebagai no-op agar struct tetap valid
+          cat >> include/linux/compiler_attributes.h << 'EOF'
+
+          /* BBR v3 compat: cacheline group macros (no-op on kernel 5.10) */
+          #ifndef __cacheline_group_begin
+          #define __cacheline_group_begin(GROUP)
+          #define __cacheline_group_end(GROUP)
+          #endif
+          EOF
+
+          echo "✓ Cacheline group compat macros injected"
+
+          # ── Apply patches (skip Kconfig & tcp.c) ────────────────────────
           PATCH_DIR="$GITHUB_WORKSPACE/bbr3-patches"
+          PASS=0
+
           for p in $(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort); do
             NAME=$(basename "$p")
 
-            # Skip Kconfig — referensi subsystem mainline tidak ada di GKI
-            if echo "$NAME" | grep -q "Kconfig"; then
-              echo "△ Skip $NAME (Kconfig mainline tidak compat GKI)"
+            # Skip Kconfig → subsystem mainline tidak ada di GKI
+            # Skip tcp.c  → 3652 lines perubahan non-BBR, terlalu invasif
+            if echo "$NAME" | grep -qE "Kconfig|net_ipv4_tcp\.c\.patch"; then
+              echo "△ Skip $NAME"
               continue
             fi
 
@@ -148,8 +166,12 @@ jobs:
             patch -p1 < "$p" || patch -p1 --fuzz=3 < "$p" || {
               echo "✗ FAILED: $NAME"; exit 1
             }
+            PASS=$((PASS+1))
           done
-          echo "✅ BBR v3 applied (5 patches, Kconfig skipped)"
+
+          echo "✅ BBR v3 applied ($PASS patches)"
+          echo "   Patches applied: tcp.h, inet_diag.h, tcp_bbr.c, tcp_output.c"
+          echo "   Skipped: Kconfig, tcp.c"
             
       # ── KSU setup ────────────────────────────────────────────────────────
       - name: Apply KernelSU (${{ matrix.ksu }})
