@@ -129,6 +129,19 @@ jobs:
           ref: ${{ inputs.kernel_ref }} 
           path: 'kernel' 
           fetch-depth: 1 
+
+      # ── Apply BBR v3 Patches ──────────────────────────────────────────────
+      - name: Apply BBR v3 patches
+        working-directory: kernel
+        run: |
+          PATCH_DIR="$GITHUB_WORKSPACE/bbr3-patches"
+          for p in $(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort); do
+            echo "Applying: $(basename $p)"
+            patch -p1 < "$p" || patch -p1 --fuzz=3 < "$p" || {
+              echo "✗ FAILED: $(basename $p)"; exit 1
+            }
+          done
+          echo "✅ BBR v3 applied"
             
       # ── KSU setup ────────────────────────────────────────────────────────
       - name: Apply KernelSU (${{ matrix.ksu }})
