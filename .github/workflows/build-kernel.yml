@@ -125,53 +125,10 @@ jobs:
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: 'whiskiesweet/kernel_common_5.10'
+          repository: 'whiskiesweet/android_kernel_common-5.10'
           ref: ${{ inputs.kernel_ref }} 
           path: 'kernel' 
           fetch-depth: 1 
-
-      # ── Apply BBR v3 Patches ──────────────────────────────────────────────
-      - name: Apply BBR v3 patches
-        working-directory: kernel
-        run: |
-          # ── Inject compat macros untuk tcp.h dari BBR v3 ────────────────
-          # __cacheline_group_begin/end baru ada di Linux 6.1+
-          # Di 5.10 kita definisikan sebagai no-op agar struct tetap valid
-          cat >> include/linux/compiler_attributes.h << 'EOF'
-
-          /* BBR v3 compat: cacheline group macros (no-op on kernel 5.10) */
-          #ifndef __cacheline_group_begin
-          #define __cacheline_group_begin(GROUP)
-          #define __cacheline_group_end(GROUP)
-          #endif
-          EOF
-
-          echo "✓ Cacheline group compat macros injected"
-
-          # ── Apply patches (skip Kconfig & tcp.c) ────────────────────────
-          PATCH_DIR="$GITHUB_WORKSPACE/bbr3-patches"
-          PASS=0
-
-          for p in $(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort); do
-            NAME=$(basename "$p")
-
-            # Skip Kconfig → subsystem mainline tidak ada di GKI
-            # Skip tcp.c  → 3652 lines perubahan non-BBR, terlalu invasif
-            if echo "$NAME" | grep -qE "Kconfig|net_ipv4_tcp\.c\.patch"; then
-              echo "△ Skip $NAME"
-              continue
-            fi
-
-            echo "Applying: $NAME"
-            patch -p1 < "$p" || patch -p1 --fuzz=3 < "$p" || {
-              echo "✗ FAILED: $NAME"; exit 1
-            }
-            PASS=$((PASS+1))
-          done
-
-          echo "✅ BBR v3 applied ($PASS patches)"
-          echo "   Patches applied: tcp.h, inet_diag.h, tcp_bbr.c, tcp_output.c"
-          echo "   Skipped: Kconfig, tcp.c"
             
       # ── KSU setup ────────────────────────────────────────────────────────
       - name: Apply KernelSU (${{ matrix.ksu }})
@@ -221,6 +178,38 @@ jobs:
           printf '\nCONFIG_LOCALVERSION="%s"\n' "$LOCALVER" \
             >> arch/arm64/configs/gki_defconfig
           echo "LOCALVERSION set to: $LOCALVER"
+      
+      # ── Apply MGLRU Backport Patches ──────────────────────────────────────
+      - name: Apply MGLRU backport patches
+        working-directory: kernel
+        run: |
+          PATCH_DIR="$GITHUB_WORKSPACE/mglru-patches"
+          PATCHES=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort)
+
+          if [ -z "$PATCHES" ]; then
+            echo "△ Tidak ada MGLRU patches — skip"
+            exit 0
+          fi
+
+          PASS=0; FAIL=0
+
+          for p in $PATCHES; do
+            NAME=$(basename "$p")
+            echo "Applying: $NAME"
+            if patch -p1 < "$p" 2>/dev/null; then
+              echo "  ✓ Applied"
+              PASS=$((PASS+1))
+            elif patch -p1 --fuzz=3 < "$p" 2>/dev/null; then
+              echo "  △ Applied with fuzz"
+              PASS=$((PASS+1))
+            else
+              echo "  ✗ FAILED: $NAME"
+              FAIL=$((FAIL+1))
+            fi
+          done
+
+          echo "MGLRU: $PASS applied, $FAIL failed"
+          [ "$FAIL" -eq 0 ] || { echo "⚠ Ada patches gagal!"; exit 1; }
           
       # ── Build ────────────────────────────────────────────────────────────
       - name: Run build.sh
