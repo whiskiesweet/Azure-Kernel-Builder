@@ -114,7 +114,7 @@ jobs:
             echo "SRC_URL=https://android.googlesource.com/kernel/common" >> $GITHUB_ENV
             echo "SRC_LABEL=Android Common Kernel (${{ inputs.source_branch }})" >> $GITHUB_ENV
           else
-            echo "SRC_URL=https://github.com/torvalds/linux.git" >> $GITHUB_ENV
+            echo "SRC_URL=https://github.com/google/bbr.git" >> $GITHUB_ENV
             echo "SRC_LABEL=Linux mainline (${{ inputs.source_branch }})" >> $GITHUB_ENV
           fi
 
