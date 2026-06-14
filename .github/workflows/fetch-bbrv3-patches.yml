@@ -1,0 +1,749 @@
+# ══════════════════════════════════════════════════════════════════════════════
+#  fetch-bbrv3-patches.yml
+#  Generate BBR v3 backport patches untuk android12-5.10 GKI
+#  Adaptasi dari fetch-mglru-patches.yml — pola identik, target berbeda
+#
+#  BBR v3 vs BBR v1 (yang ada di kernel kamu sekarang):
+#    BBR v1 → merged Linux 4.9, estimasi bandwidth sederhana, bisa unfair
+#    BBR v3 → merged Linux 6.5 (Neal Cardwell, Google), lebih akurat & fair
+#             startup/drain lebih cepat, probe bandwidth lebih smooth,
+#             loss recovery jauh lebih baik, latency lebih stabil
+#
+#  FILE YANG DIUBAH BBR v3:
+#    UTAMA:
+#      net/ipv4/tcp_bbr.c           ← Inti BBR, rewrite total dari v1
+#    MINOR (context/hooks):
+#      net/ipv4/tcp_output.c        ← skb_mstamp hook untuk timing
+#      include/linux/tcp.h          ← field tambahan di struct tcp_sock
+#      include/uapi/linux/inet_diag.h ← tcp_bbr_info struct baru (ss output)
+#
+#  SOURCE TERBAIK:
+#    1. android13-5.10 / android14-5.10 (AOSP) — sudah adapted untuk 5.10
+#    2. torvalds/linux v6.5+ — fallback, mungkin butuh minor adaptation
+#
+#  CONFIG (tambah ke build.sh jika belum ada):
+#    -e TCP_CONG_BBR  ← sudah punya ini ✓
+#    -e DEFAULT_BBR   ← sudah punya ini ✓
+#    Tidak perlu config baru — BBR v3 replace BBR v1 di file yang sama
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: 🔧 Fetch BBR v3 Backport Patches
+
+on:
+  workflow_dispatch:
+    inputs:
+
+      patch_mode:
+        description: 'Mode fetch patches'
+        type: choice
+        options:
+          - diff-full
+          - commit-based
+        default: diff-full
+
+      source_type:
+        description: 'Sumber BBR v3 (aosp = android common kernel, mainline = torvalds/linux)'
+        type: choice
+        options:
+          - aosp
+          - mainline
+        default: aosp
+
+      source_branch:
+        description: 'Branch/tag sumber BBR v3 (aosp: android14-5.10 | mainline: v6.5)'
+        type: string
+        default: android14-5.10
+
+      base_branch:
+        description: 'Branch base tanpa BBR v3 (fork kita)'
+        type: string
+        default: android12-5.10
+
+      kernel_branch:
+        description: 'Branch fork kernel untuk dry-run test'
+        type: string
+        default: android12-5.10
+
+      commit_keywords:
+        description: '[commit-based] Keywords cari BBR v3 commits (pisah | untuk OR)'
+        type: string
+        default: 'tcp_bbr: v3|BBR v3|bbr3|tcp: bbr|bbrv3|BBRv3'
+
+      depth_months:
+        description: 'Seberapa jauh clone history (months, untuk commit-based)'
+        type: string
+        default: '36'
+
+      dry_run:
+        description: 'Dry run — generate & test TAPI jangan commit ke repo'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-bbrv3-patches:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ────────────────────────────────────────────────────────────────────────
+      # 1. Checkout Azure-Kernel-Builder
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Checkout Azure-Kernel-Builder
+        uses: actions/checkout@v4
+        with:
+          repository: whiskiesweet/Azure-Kernel-Builder
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup workspace
+        run: |
+          git config user.name  "whiskiesweet"
+          git config user.email "noreply@github.com"
+
+          mkdir -p bbr3-patches
+
+          echo "PATCH_DIR=$GITHUB_WORKSPACE/bbr3-patches" >> $GITHUB_ENV
+          echo "SRC_BRANCH=${{ inputs.source_branch }}"   >> $GITHUB_ENV
+          echo "BASE_BRANCH=${{ inputs.base_branch }}"    >> $GITHUB_ENV
+
+          # Tentukan URL sumber berdasarkan source_type
+          if [ "${{ inputs.source_type }}" = "aosp" ]; then
+            echo "SRC_URL=https://android.googlesource.com/kernel/common" >> $GITHUB_ENV
+            echo "SRC_LABEL=Android Common Kernel (${{ inputs.source_branch }})" >> $GITHUB_ENV
+          else
+            echo "SRC_URL=https://github.com/torvalds/linux.git" >> $GITHUB_ENV
+            echo "SRC_LABEL=Linux mainline (${{ inputs.source_branch }})" >> $GITHUB_ENV
+          fi
+
+          echo "════════════════════════════════════════════"
+          echo " Mode      : ${{ inputs.patch_mode }}"
+          echo " Source    : ${{ inputs.source_type }} / ${{ inputs.source_branch }}"
+          echo " Base      : ${{ inputs.base_branch }}"
+          echo " Dry run   : ${{ inputs.dry_run }}"
+          echo "════════════════════════════════════════════"
+
+
+      # ══════════════════════════════════════════════════════════════════════
+      #  MODE: diff-full (DEFAULT untuk BBR — lebih simpel karena 1 file utama)
+      #  Clone base & source depth=1, diff net/ipv4/tcp_bbr.c langsung
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "[diff-full] Clone SOURCE (dengan BBR v3)"
+        if: inputs.patch_mode == 'diff-full'
+        run: |
+          echo "Cloning SOURCE: $SRC_LABEL"
+          echo "(sparse: net/ include/linux/tcp.h include/uapi/linux/)"
+
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            --depth=1 \
+            --branch "${{ inputs.source_branch }}" \
+            "$SRC_URL" \
+            /tmp/bbr-src
+
+          cd /tmp/bbr-src
+          git sparse-checkout init --cone
+          git sparse-checkout set net include/linux include/uapi/linux
+
+          git checkout "${{ inputs.source_branch }}"
+
+          echo ""
+          echo "✓ Source ready: $(git log --oneline -1)"
+
+          # Verifikasi BBR v3 ada di source
+          echo ""
+          echo "[ Deteksi BBR v3 di source ]"
+
+          # BBR v3 signature: ada fungsi bbr_max_bw_filter atau comment BBR v3
+          if grep -q "bbr_max_bw_filter\|BBR v3\|bbrv3\|bbr3_" \
+               net/ipv4/tcp_bbr.c 2>/dev/null; then
+            BBR_VER="v3"
+            echo "  ✓ BBR v3 terdeteksi di tcp_bbr.c"
+          elif grep -q "bbr_probe_bw\|bbr_probe_rtt\|BbrMode" \
+               net/ipv4/tcp_bbr.c 2>/dev/null; then
+            BBR_VER="v2"
+            echo "  △ BBR v2 terdeteksi (bukan v3 — coba source_branch yang lebih baru)"
+          else
+            BBR_VER="v1"
+            echo "  ✗ Kemungkinan masih BBR v1 atau file tidak ditemukan"
+          fi
+
+          echo "BBR_VER_SRC=$BBR_VER" >> $GITHUB_ENV
+          BBR_LINES=$(wc -l < net/ipv4/tcp_bbr.c 2>/dev/null || echo 0)
+          echo "  tcp_bbr.c size: $BBR_LINES lines"
+
+          if [ "$BBR_VER" = "v1" ]; then
+            echo ""
+            echo "⚠  Source branch tidak punya BBR v3!"
+            echo "   Saran:"
+            echo "   - source_type = mainline, source_branch = v6.5"
+            echo "   - atau coba android14-5.10 / android15-5.10"
+          fi
+
+      - name: "[diff-full] Clone BASE (android12-5.10, BBR v1)"
+        if: inputs.patch_mode == 'diff-full'
+        run: |
+          echo "Cloning BASE: android12-5.10 ..."
+          echo "(sparse: net/ include/linux/tcp.h include/uapi/linux/)"
+
+          # Base selalu dari AOSP android12-5.10
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            --depth=1 \
+            --branch "${{ inputs.base_branch }}" \
+            https://android.googlesource.com/kernel/common \
+            /tmp/bbr-base
+
+          cd /tmp/bbr-base
+          git sparse-checkout init --cone
+          git sparse-checkout set net include/linux include/uapi/linux
+
+          git checkout "${{ inputs.base_branch }}"
+
+          echo "✓ Base ready: $(git log --oneline -1)"
+
+          # Cek versi BBR di base
+          BASE_LINES=$(wc -l < net/ipv4/tcp_bbr.c 2>/dev/null || echo 0)
+          echo "  tcp_bbr.c size: $BASE_LINES lines (harusnya ~1200 untuk BBR v1)"
+
+      - name: "[diff-full] Generate per-file BBR v3 diff patches"
+        if: inputs.patch_mode == 'diff-full'
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " GENERATE BBR v3 DIFF PATCHES"
+          echo " Dari : $BASE_BRANCH (BBR v1)"
+          echo " Ke   : $SRC_LABEL (BBR v3)"
+          echo "══════════════════════════════════════════════════════════════"
+
+          # Hapus patches lama
+          rm -f "$PATCH_DIR"/bbr3-*.patch
+
+          GENERATED=0
+          IDENTICAL=0
+
+          # Urutan: header dulu (tcp.h, inet_diag.h), baru implementasi
+          for FILE in \
+            "include/linux/tcp.h" \
+            "include/uapi/linux/inet_diag.h" \
+            "net/ipv4/tcp_bbr.c" \
+            "net/ipv4/tcp_output.c" \
+            "net/ipv4/tcp.c" \
+            "net/Kconfig"; do
+
+            BASE_F="/tmp/bbr-base/$FILE"
+            SRC_F="/tmp/bbr-src/$FILE"
+            SAFE=$(echo "$FILE" | tr '/' '_')
+            OUT="$PATCH_DIR/bbr3-${SAFE}.patch"
+
+            if [ ! -f "$BASE_F" ] || [ ! -f "$SRC_F" ]; then
+              echo "  △ Skip $FILE — tidak ditemukan di salah satu tree"
+              continue
+            fi
+
+            diff -u "$BASE_F" "$SRC_F" \
+              --label "a/$FILE" \
+              --label "b/$FILE" \
+              > "$OUT" || true
+
+            if [ -s "$OUT" ]; then
+              LINES=$(wc -l < "$OUT")
+              ADDS=$(grep -c "^+[^+]" "$OUT" 2>/dev/null || echo 0)
+              DELS=$(grep -c "^-[^-]" "$OUT" 2>/dev/null || echo 0)
+
+              if   [ "$LINES" -gt 3000 ]; then FLAG="⚠  BESAR  "
+              elif [ "$LINES" -gt 1000 ]; then FLAG="△  medium "
+              else                              FLAG="✓  ok     "; fi
+
+              echo "  $FLAG $FILE"
+              echo "          Lines:$LINES | +$ADDS / -$DELS"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "  ○  $FILE — identik (tidak ada perubahan)"
+              rm -f "$OUT"
+              IDENTICAL=$((IDENTICAL+1))
+            fi
+          done
+
+          echo ""
+          echo "═══════════════════════════════════════════════════════════"
+          echo " diff-full: $GENERATED generated, $IDENTICAL identical"
+          echo "═══════════════════════════════════════════════════════════"
+
+          # tcp_bbr.c adalah yang terpenting — kalau ini tidak ada, ada masalah
+          if [ ! -f "$PATCH_DIR/bbr3-net_ipv4_tcp_bbr.c.patch" ]; then
+            echo ""
+            echo "❌ tcp_bbr.c patch tidak dihasilkan!"
+            echo "   Kemungkinan source dan base identik (source belum punya BBR v3)"
+            echo "   → Coba: source_type = mainline, source_branch = v6.5"
+            exit 1
+          fi
+
+          [ "$GENERATED" -gt 0 ] || { echo "❌ Tidak ada patch!"; exit 1; }
+
+
+      # ══════════════════════════════════════════════════════════════════════
+      #  MODE: commit-based
+      #  Clone dengan history, cari commits BBR v3, generate format-patch
+      # ══════════════════════════════════════════════════════════════════════
+
+      - name: "[commit-based] Clone source dengan git history (sparse net/)"
+        if: inputs.patch_mode == 'commit-based'
+        run: |
+          MONTHS="${{ inputs.depth_months }}"
+          SINCE_DATE=$(date -d "$MONTHS months ago" '+%Y-%m-%d' 2>/dev/null \
+                       || python3 -c "
+          from datetime import datetime, timedelta
+          d = datetime.now() - timedelta(days=int('$MONTHS')*30)
+          print(d.strftime('%Y-%m-%d'))
+          ")
+
+          echo "Cloning $SRC_LABEL (sparse: net/ include/)"
+          echo "Shallow since: $SINCE_DATE"
+
+          git clone \
+            --filter=blob:none \
+            --no-checkout \
+            --shallow-since="$SINCE_DATE" \
+            "$SRC_URL" \
+            /tmp/bbr-src
+
+          cd /tmp/bbr-src
+          git sparse-checkout init --cone
+          git sparse-checkout set net include/linux include/uapi/linux
+
+          git fetch --update-shallow origin \
+            "refs/heads/${{ inputs.source_branch }}:refs/heads/${{ inputs.source_branch }}" \
+            2>/dev/null \
+            || git fetch --update-shallow origin "${{ inputs.source_branch }}"
+
+          git checkout "${{ inputs.source_branch }}" 2>/dev/null \
+            || git checkout -b "${{ inputs.source_branch }}" \
+               "origin/${{ inputs.source_branch }}" 2>/dev/null \
+            || { echo "❌ Gagal checkout ${{ inputs.source_branch }}"; exit 1; }
+
+          echo "✓ Source: $(git log --oneline -1)"
+
+      - name: "[commit-based] Cari & extract BBR v3 commits"
+        if: inputs.patch_mode == 'commit-based'
+        run: |
+          cd /tmp/bbr-src
+
+          KEYWORDS="${{ inputs.commit_keywords }}"
+
+          echo "═══════════════════════════════════════════════════════════"
+          echo " Mencari BBR v3 commits"
+          echo " Keywords: $KEYWORDS"
+          echo "═══════════════════════════════════════════════════════════"
+
+          ALL_COMMITS=""
+
+          IFS='|' read -ra KW_LIST <<< "$KEYWORDS"
+          for KW in "${KW_LIST[@]}"; do
+            KW=$(echo "$KW" | xargs)
+            echo -n "  '$KW' → "
+
+            FOUND=$(git log \
+              --pretty=format:"%H" \
+              --grep="$KW" \
+              --all \
+              -- net/ipv4/tcp_bbr.c net/ipv4/tcp_output.c \
+                 include/linux/tcp.h include/uapi/linux/inet_diag.h \
+              2>/dev/null || true)
+
+            if [ -n "$FOUND" ]; then
+              echo "$(echo "$FOUND" | wc -l) commits"
+              ALL_COMMITS="$ALL_COMMITS"$'\n'"$FOUND"
+            else
+              echo "0 commits"
+            fi
+          done
+
+          # Tambah: cari via perubahan code BBR v3 spesifik
+          echo ""
+          echo "  Cari via file-change (tcp_bbr.c bbr_max_bw_filter)..."
+          FILE_COMMITS=$(git log \
+            --pretty=format:"%H" \
+            --all \
+            -S "bbr_max_bw_filter\|bbr_probe_bw_down\|BBR_BW_FILTER_LEN" \
+            -- net/ipv4/tcp_bbr.c \
+            2>/dev/null || true)
+          if [ -n "$FILE_COMMITS" ]; then
+            echo "  file-change → $(echo "$FILE_COMMITS" | wc -l) commits"
+            ALL_COMMITS="$ALL_COMMITS"$'\n'"$FILE_COMMITS"
+          fi
+
+          # Dedup + sort chronologically
+          UNIQUE_COMMITS=$(echo "$ALL_COMMITS" \
+            | sort -u | grep -v "^$" \
+            | xargs -I{} git log --pretty=format:"%ct %H" -1 {} 2>/dev/null \
+            | sort -n | awk '{print $2}')
+
+          TOTAL=$(echo "$UNIQUE_COMMITS" | grep -c "." || echo 0)
+          echo ""
+          echo "Total BBR v3 commits unik: $TOTAL"
+
+          if [ -z "$UNIQUE_COMMITS" ] || [ "$TOTAL" -eq 0 ]; then
+            echo ""
+            echo "⚠  Tidak ada commits BBR v3 ditemukan!"
+            echo "   Saran:"
+            echo "   1. Coba patch_mode = diff-full (lebih mudah untuk BBR)"
+            echo "   2. Coba source_type = mainline, source_branch = v6.5"
+            echo "   3. Tambah depth_months = 48"
+            exit 1
+          fi
+
+          echo ""
+          echo "BBR v3 commits (oldest → newest):"
+          echo "─────────────────────────────────────────────────"
+          IDX=0
+          for C in $UNIQUE_COMMITS; do
+            IDX=$((IDX+1))
+            printf "%3d. %s\n" "$IDX" "$(git log --oneline -1 $C)"
+          done
+
+          # Generate format-patches
+          echo ""
+          echo "Generating format-patches..."
+          mkdir -p /tmp/bbr3-patches
+          rm -f /tmp/bbr3-patches/*.patch
+
+          GENERATED=0
+          IDX=0
+
+          for C in $UNIQUE_COMMITS; do
+            IDX=$((IDX+1))
+            SUBJECT=$(git log --pretty=format:"%f" -1 "$C" \
+              | tr '[:upper:]' '[:lower:]' \
+              | sed 's/[^a-z0-9-]/-/g' \
+              | sed 's/--*/-/g' \
+              | cut -c1-60)
+
+            PNAME="$(printf '%04d' $IDX)-${SUBJECT}.patch"
+            OUT="/tmp/bbr3-patches/$PNAME"
+
+            git format-patch -1 "$C" \
+              --stdout \
+              -- net/ipv4/tcp_bbr.c net/ipv4/tcp_output.c net/ipv4/tcp.c \
+                 include/linux/tcp.h include/uapi/linux/inet_diag.h \
+              > "$OUT" 2>/dev/null || true
+
+            if [ -s "$OUT" ]; then
+              echo "  ✓ $PNAME ($(wc -l < "$OUT") lines)"
+              GENERATED=$((GENERATED+1))
+            else
+              echo "  ○ $PNAME — kosong, dihapus"
+              rm -f "$OUT"
+            fi
+          done
+
+          rm -f "$PATCH_DIR"/[0-9][0-9][0-9][0-9]-*.patch
+          cp /tmp/bbr3-patches/*.patch "$PATCH_DIR"/ 2>/dev/null || true
+
+          echo ""
+          echo "commit-based: $GENERATED patches dihasilkan"
+          [ "$GENERATED" -gt 0 ] || { echo "❌ Tidak ada patch!"; exit 1; }
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Audit patches
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Audit BBR v3 patches & KMI check
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " AUDIT BBR v3 PATCHES"
+          echo "══════════════════════════════════════════════════════════════"
+
+          PATCHES=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort)
+          [ -n "$PATCHES" ] || { echo "❌ Tidak ada patches!"; exit 1; }
+
+          TOTAL=$(echo "$PATCHES" | wc -l)
+          KMI_WARN=0
+
+          echo "Total patches: $TOTAL"
+          echo ""
+
+          for p in $PATCHES; do
+            NAME=$(basename "$p")
+            LINES=$(wc -l < "$p")
+            echo "┌─ $NAME ($LINES lines)"
+
+            # Cek BBR v3 signature symbols
+            BBR3_HITS=$(grep -c \
+              "bbr_max_bw_filter\|bbr_probe_bw_down\|BBR_BW_FILTER_LEN\|bbr3\|BBR v3" \
+              "$p" 2>/dev/null || echo 0)
+            echo "│  BBR v3 symbols: $BBR3_HITS"
+
+            # Cek ukuran tcp_bbr.c diff (BBR v3 = besar, ~2500 lines)
+            if echo "$NAME" | grep -q "tcp_bbr"; then
+              if [ "$LINES" -gt 2000 ]; then
+                echo "│  ✓ tcp_bbr.c diff besar ($LINES lines) — kemungkinan full BBR v3"
+              elif [ "$LINES" -gt 500 ]; then
+                echo "│  △ tcp_bbr.c diff medium ($LINES lines) — mungkin partial update"
+              else
+                echo "│  ⚠  tcp_bbr.c diff kecil ($LINES lines) — cek apakah benar BBR v3"
+              fi
+            fi
+
+            # Cek EXPORT_SYMBOL
+            EXPORTS=$(grep "^+.*EXPORT_SYMBOL" "$p" 2>/dev/null \
+              | grep -v "^+++ " || true)
+            if [ -n "$EXPORTS" ]; then
+              echo "│  ⚠  KMI: EXPORT_SYMBOL additions:"
+              echo "$EXPORTS" | head -3 | sed 's/^/│    /'
+              KMI_WARN=$((KMI_WARN+1))
+            fi
+
+            # Cek struct tcp_sock changes (bisa affect KMI)
+            STRUCT_CHANGES=$(grep "^+.*tcp_sock\|^+.*struct bbr" "$p" 2>/dev/null \
+              | grep -v "^+++ " | wc -l || echo 0)
+            if [ "$STRUCT_CHANGES" -gt 0 ]; then
+              echo "│  △ struct tcp_sock/bbr changes: $STRUCT_CHANGES lines"
+              echo "│    → Cek KMI jika tcp_sock ada di abi_gki_aarch64.xml"
+            fi
+
+            echo "└──"
+          done
+
+          echo ""
+          if [ "$KMI_WARN" -gt 0 ]; then
+            echo "⚠  $KMI_WARN patches berpotensi affect KMI — jalankan KMI test setelah build"
+          else
+            echo "✅ Tidak ada KMI risk yang terdeteksi"
+          fi
+
+          echo "KMI_WARN=$KMI_WARN" >> $GITHUB_ENV
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Clone fork & dry-run test
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Clone kernel fork untuk dry-run
+        run: |
+          git clone --depth=1 \
+            --branch "${{ inputs.kernel_branch }}" \
+            https://github.com/whiskiesweet/android_kernel_common-5.10.git \
+            /tmp/our-kernel
+
+          echo "✓ Fork: $(git -C /tmp/our-kernel log --oneline -1)"
+
+          # Cek versi BBR di fork kita sekarang
+          echo ""
+          echo "[ Cek versi BBR di fork sekarang ]"
+          if grep -q "bbr_max_bw_filter\|BBR v3" \
+               /tmp/our-kernel/net/ipv4/tcp_bbr.c 2>/dev/null; then
+            echo "  ⚠  BBR v3 sudah ada di fork! Patches mungkin sudah applied."
+          else
+            BBR_LINES=$(wc -l < /tmp/our-kernel/net/ipv4/tcp_bbr.c 2>/dev/null || echo 0)
+            echo "  ✓ Fork masih BBR v1 ($BBR_LINES lines) — siap menerima BBR v3 patch"
+          fi
+
+          echo "OUR_KERNEL=/tmp/our-kernel" >> $GITHUB_ENV
+
+      - name: Dry-run test BBR v3 patches ke fork
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " DRY-RUN: Apply BBR v3 patches ke android12-5.10 (simulasi)"
+          echo "══════════════════════════════════════════════════════════════"
+
+          PATCHES=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | sort)
+          [ -n "$PATCHES" ] || { echo "Tidak ada patches."; exit 0; }
+
+          PASS=0; FUZZY=0; FAIL=0
+          FAIL_NAMES=""
+
+          for p in $PATCHES; do
+            NAME=$(basename "$p")
+            echo ""
+            echo "─── $NAME ───"
+            > /tmp/dry.log
+
+            if [ "${{ inputs.patch_mode }}" = "commit-based" ]; then
+              if git -C "$OUR_KERNEL" apply --check < "$p" > /tmp/dry.log 2>&1; then
+                echo "  ✓ CLEAN"
+                PASS=$((PASS+1))
+              elif git -C "$OUR_KERNEL" apply --check --3way < "$p" >> /tmp/dry.log 2>&1; then
+                echo "  △ FUZZY (3way merge — masih aman)"
+                FUZZY=$((FUZZY+1))
+              else
+                echo "  ✗ CONFLICT:"
+                grep -E "error:|FAILED|does not apply" /tmp/dry.log | head -5 | sed 's/^/    /'
+                FAIL=$((FAIL+1))
+                FAIL_NAMES="$FAIL_NAMES $NAME"
+              fi
+            else
+              if patch -p1 --dry-run -d "$OUR_KERNEL" < "$p" > /tmp/dry.log 2>&1; then
+                echo "  ✓ CLEAN"
+                PASS=$((PASS+1))
+              elif patch -p1 --dry-run --fuzz=3 -d "$OUR_KERNEL" < "$p" >> /tmp/dry.log 2>&1; then
+                echo "  △ FUZZY (fuzz=3)"
+                FUZZY=$((FUZZY+1))
+              else
+                echo "  ✗ CONFLICT:"
+                grep -E "FAILED|can't find|does not apply" \
+                  /tmp/dry.log | head -5 | sed 's/^/    /'
+                FAIL=$((FAIL+1))
+                FAIL_NAMES="$FAIL_NAMES $NAME"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "══════════════════════════════════════════════════════════════"
+          echo " Dry-run: ✓$PASS clean | △$FUZZY fuzzy | ✗$FAIL conflict"
+          echo "══════════════════════════════════════════════════════════════"
+
+          if [ "$FAIL" -gt 0 ]; then
+            echo ""
+            echo "Patches CONFLICT: $FAIL_NAMES"
+            echo ""
+            echo "═══ Resolve tanpa laptop ═══"
+            echo ""
+            echo "PALING UMUM untuk BBR: context mismatch di tcp_bbr.c"
+            echo "Karena android12-5.10 bisa punya minor tweak vs base linux 5.10"
+            echo ""
+            echo "OPSI 1 — Coba source AOSP dulu (jika sekarang pakai mainline):"
+            echo "  source_type = aosp, source_branch = android13-5.10"
+            echo "  AOSP lebih dekat ke base fork kita → lebih sedikit conflict"
+            echo ""
+            echo "OPSI 2 — Ganti patch_mode:"
+            echo "  diff-full lebih toleran, commit-based lebih presisi"
+            echo "  Coba yang berbeda dari sekarang"
+            echo ""
+            echo "OPSI 3 — Manual apply tcp_bbr.c via GitHub:"
+            echo "  BBR v3 = replace total tcp_bbr.c, bukan patch per baris"
+            echo "  1. Buka bbr3-patches/bbr3-net_ipv4_tcp_bbr.c.patch"
+            echo "  2. Ambil bagian +++ (file baru) dari patch"
+            echo "  3. Replace seluruh isi net/ipv4/tcp_bbr.c di fork kamu"
+            echo "     via GitHub editor → ini paling efektif untuk BBR"
+          fi
+
+          echo "DRY_PASS=$PASS"   >> $GITHUB_ENV
+          echo "DRY_FUZZY=$FUZZY" >> $GITHUB_ENV
+          echo "DRY_FAIL=$FAIL"   >> $GITHUB_ENV
+          exit 0
+
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Summary
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Generate build integration guide
+        run: |
+          PATCH_COUNT=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | wc -l || echo 0)
+          MODE="${{ inputs.patch_mode }}"
+
+          cat >> "$GITHUB_STEP_SUMMARY" << SUMEOF
+          # 🔧 BBR v3 Patches Ready
+
+          ## Status
+          | Item | Value |
+          |------|-------|
+          | Source | \`${{ inputs.source_type }}\` / \`$SRC_BRANCH\` |
+          | BBR versi terdeteksi | \`${BBR_VER_SRC:-unknown}\` |
+          | Patches generated | $PATCH_COUNT |
+          | Dry-run | ✓$DRY_PASS clean / △$DRY_FUZZY fuzzy / ✗$DRY_FAIL conflict |
+          | KMI warnings | $KMI_WARN |
+
+          ## Integrasi ke build-kernel.yml
+
+          Tambahkan step berikut **setelah** "Checkout Kernel Source",
+          **sebelum** "Run build.sh":
+
+          \`\`\`yaml
+          # ── Apply BBR v3 Patches ─────────────────────────────────────────────────
+          - name: Apply BBR v3 patches
+            working-directory: kernel
+            run: |
+              PATCH_DIR="\$GITHUB_WORKSPACE/../Azure-Kernel-Builder/bbr3-patches"
+              PATCHES=\$(ls "\$PATCH_DIR"/*.patch 2>/dev/null | sort)
+
+              if [ -z "\$PATCHES" ]; then
+                echo "△ Tidak ada BBR v3 patches — skip"
+                exit 0
+              fi
+
+              PASS=0; FAIL=0
+              for p in \$PATCHES; do
+                NAME=\$(basename "\$p")
+                echo "Applying: \$NAME"
+                if patch -p1 < "\$p" 2>/dev/null; then
+                  echo "  ✓ Applied"
+                  PASS=\$((PASS+1))
+                elif patch -p1 --fuzz=3 < "\$p" 2>/dev/null; then
+                  echo "  △ Applied with fuzz"
+                  PASS=\$((PASS+1))
+                else
+                  echo "  ✗ FAILED: \$NAME"
+                  FAIL=\$((FAIL+1))
+                fi
+              done
+              echo "BBR v3 patches: \$PASS applied, \$FAIL failed"
+              [ "\$FAIL" -eq 0 ] || exit 1
+          \`\`\`
+
+          > **Catatan**: \`build.sh\` sudah punya \`-e TCP_CONG_BBR -e DEFAULT_BBR\` ✓
+          > Tidak perlu tambah config baru — BBR v3 replace BBR v1 di file yang sama.
+
+          ## File BBR v3 yang Diubah
+          - \`net/ipv4/tcp_bbr.c\` ← **utama, rewrite total**
+          - \`include/linux/tcp.h\` ← struct tcp_sock additions
+          - \`include/uapi/linux/inet_diag.h\` ← stats struct baru
+          - \`net/ipv4/tcp_output.c\` ← minor hooks
+          SUMEOF
+
+          echo "✓ Summary ditulis ke GitHub Step Summary"
+
+      - name: Final patch listing
+        run: |
+          echo "══════════════════════════════════════════════════════════════"
+          echo " FINAL BBR v3 PATCHES"
+          echo "══════════════════════════════════════════════════════════════"
+          ls -lah "$PATCH_DIR"/*.patch 2>/dev/null || echo "Tidak ada patches!"
+          echo ""
+          echo "Source   : $SRC_LABEL"
+          echo "Dry-run  : ✓$DRY_PASS △$DRY_FUZZY ✗$DRY_FAIL"
+          echo "KMI      : $KMI_WARN warnings"
+          [ "${{ inputs.dry_run }}" = "true" ] \
+            && echo "ℹ  dry_run=true → tidak di-commit" \
+            || echo "→ Melanjutkan ke commit step..."
+
+      # ────────────────────────────────────────────────────────────────────────
+      # Commit ke repo
+      # ────────────────────────────────────────────────────────────────────────
+      - name: Commit bbr3-patches/ ke Azure-Kernel-Builder
+        if: ${{ !inputs.dry_run }}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+
+          PATCH_COUNT=$(ls bbr3-patches/*.patch 2>/dev/null | wc -l || echo 0)
+          [ "$PATCH_COUNT" -gt 0 ] || { echo "Tidak ada patches — skip"; exit 0; }
+
+          git add bbr3-patches/
+          git diff --cached --quiet && { echo "△ Identik — skip"; exit 0; }
+
+          git commit -m "bbr3-patches: BBR v3 backport ${{ inputs.patch_mode }} ($SRC_BRANCH → $BASE_BRANCH)
+
+          Mode     : ${{ inputs.patch_mode }}
+          Source   : ${{ inputs.source_type }} / $SRC_BRANCH
+          Base     : $BASE_BRANCH
+          Count    : $PATCH_COUNT patches
+
+          Dry-run  : ✓$DRY_PASS clean | △$DRY_FUZZY fuzzy | ✗$DRY_FAIL conflict
+          KMI      : $KMI_WARN warnings
+
+          File utama:
+            net/ipv4/tcp_bbr.c          ← BBR v3 full implementation
+            include/linux/tcp.h         ← struct tcp_sock additions
+            include/uapi/linux/inet_diag.h ← stats struct baru
+
+          CONFIG sudah ada di build.sh:
+            -e TCP_CONG_BBR -e DEFAULT_BBR ✓"
+
+          git push origin main
+
+          echo "✅ bbr3-patches/ berhasil di-push"
+          echo "   Count: $PATCH_COUNT | ✓$DRY_PASS △$DRY_FUZZY ✗$DRY_FAIL"
